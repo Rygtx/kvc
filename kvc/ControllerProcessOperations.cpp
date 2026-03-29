@@ -1187,9 +1187,18 @@ std::vector<ProcessEntry> Controller::GetProcessList() noexcept
                 if (g_interrupted) break;
 
                 auto it = nameMap.find(entry.Pid);
-                entry.ProcessName = (it != nameMap.end())
-                    ? it->second
-                    : Utils::ResolveUnknownProcessLocal(entry.Pid, entry.KernelAddress, entry.ProtectionLevel, entry.SignerType);
+                if (it != nameMap.end()) {
+                    entry.ProcessName = it->second;
+                } else {
+                    // Fallback for protected processes (csrss.exe PPL-WinTcb etc.)
+                    // Utils::GetProcessName tries OpenProcess+GetProcessImageFileName which may succeed for individual PID
+                    std::wstring fallbackName = Utils::GetProcessName(entry.Pid);
+                    if (fallbackName != L"[Unknown]") {
+                        entry.ProcessName = fallbackName;
+                    } else {
+                        entry.ProcessName = Utils::ResolveUnknownProcessLocal(entry.Pid, entry.KernelAddress, entry.ProtectionLevel, entry.SignerType);
+                    }
+                }
 
                 processes.push_back(std::move(entry));
                 processCount++;

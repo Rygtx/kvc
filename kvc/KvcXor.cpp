@@ -24,12 +24,17 @@ namespace rng = std::ranges;
 constexpr std::array<uint8_t, 7> XOR_KEY = { 0xA0, 0xE2, 0x80, 0x8B, 0xE2, 0x80, 0x8C };
 
 // File paths
-constexpr std::string_view KVC_PASS_EXE = "kvc_pass.exe";
-constexpr std::string_view KVC_CRYPT_DLL = "kvc_crypt.dll";
-constexpr std::string_view KVC_RAW = "kvc.raw";
-constexpr std::string_view KVC_DAT = "kvc.dat";
-constexpr std::string_view KVC_EXE = "kvc.exe";
-constexpr std::string_view KVC_ENC = "kvc.enc";
+constexpr std::string_view KVC_PASS_EXE    = "kvc_pass.exe";
+constexpr std::string_view KVC_CRYPT_DLL   = "kvc_crypt.dll";
+constexpr std::string_view KVC_RAW         = "kvc.raw";
+constexpr std::string_view KVC_DAT         = "kvc.dat";
+constexpr std::string_view KVC_EXE         = "kvc.exe";
+constexpr std::string_view KVC_ENC         = "kvc.enc";
+// UnderVolter module
+constexpr std::string_view UV_LOADER_EFI   = "Loader.efi";
+constexpr std::string_view UV_EFI          = "UnderVolter.efi";
+constexpr std::string_view UV_INI          = "UnderVolter.ini";
+constexpr std::string_view UV_DAT          = "UnderVolter.dat";
 
 // Helper for string concatenation (replaces std::format)
 inline std::string concat(std::string_view a) {
@@ -141,27 +146,40 @@ public:
 
 // Console colors
 enum class Color : int {
-    Default = 7,
-    Green = 10,
-    Red = 12,
-    Yellow = 14
+    Black = 0,
+    Blue = 1,
+    Green = 2,
+    Cyan = 3,
+    Red = 4,
+    Magenta = 5,
+    Yellow = 6,
+    White = 7,
+    Gray = 8,
+    LightBlue = 9,
+    LightGreen = 10,
+    LightCyan = 11,
+    LightRed = 12,
+    LightMagenta = 13,
+    LightYellow = 14,
+    BrightWhite = 15
 };
 
 void set_color(Color color) {
 #ifdef _WIN32
     SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), static_cast<int>(color));
 #else
-    switch (color) {
-        case Color::Green:   std::cout << "\033[32m"; break;
-        case Color::Red:     std::cout << "\033[31m"; break;
-        case Color::Yellow:  std::cout << "\033[33m"; break;
-        case Color::Default: std::cout << "\033[0m";  break;
+    static const char* ansi_colors[] = {
+        "\033[30m", "\033[34m", "\033[32m", "\033[36m", "\033[31m", "\033[35m", "\033[33m", "\033[37m",
+        "\033[90m", "\033[94m", "\033[92m", "\033[96m", "\033[91m", "\033[95m", "\033[93m", "\033[97m"
+    };
+    if (static_cast<int>(color) >= 0 && static_cast<int>(color) < 16) {
+        std::cout << ansi_colors[static_cast<int>(color)];
     }
 #endif
 }
 
 void reset_color() {
-    set_color(Color::Default);
+    set_color(Color::White);
 }
 
 // RAII color guard
@@ -609,32 +627,88 @@ Result<void> decode_everything() {
     return Result<void>();
 }
 
+// Encode UnderVolter module: Loader.efi + UnderVolter.efi + UnderVolter.ini -> UnderVolter.dat
+Result<void> encode_undervolter() {
+    std::cout << "Encoding " << UV_LOADER_EFI << " + " << UV_EFI << " + " << UV_INI << "...\n";
+
+    auto loader_result = read_file(UV_LOADER_EFI);
+    if (!loader_result) return Result<void>(loader_result.error());
+
+    auto efi_result = read_file(UV_EFI);
+    if (!efi_result) return Result<void>(efi_result.error());
+
+    auto ini_result = read_file(UV_INI);
+    if (!ini_result) return Result<void>(ini_result.error());
+
+    // Concatenate: Loader.efi | UnderVolter.efi | UnderVolter.ini
+    std::vector<uint8_t> combined;
+    combined.reserve(loader_result->size() + efi_result->size() + ini_result->size());
+    combined.insert(combined.end(), loader_result->begin(), loader_result->end());
+    combined.insert(combined.end(), efi_result->begin(),    efi_result->end());
+    combined.insert(combined.end(), ini_result->begin(),    ini_result->end());
+
+    // XOR encrypt (same key as kvc.dat)
+    xor_data(combined, XOR_KEY);
+
+    if (auto result = write_file(UV_DAT, combined); !result) return result;
+
+    {
+        ColorGuard green(Color::Green);
+        std::cout << "  -> " << UV_LOADER_EFI << " (" << loader_result->size() << " B)"
+                  << " + " << UV_EFI << " (" << efi_result->size() << " B)"
+                  << " + " << UV_INI << " (" << ini_result->size() << " B)"
+                  << "\n  -> XOR-encrypted -> " << UV_DAT
+                  << " (" << combined.size() << " B)\n";
+    }
+    std::cout << "  -> Deploy with: kvc undervolter deploy\n";
+    return Result<void>();
+}
+
 // Display menu
 void display_menu() {
-    std::cout << "==================================================\n";
-    std::cout << "|           FILE ENCODER/DECODER TOOL           |\n";
-    std::cout << "==================================================\n";
-    std::cout << "| 1. ENCODE: kvc_pass.exe + kvc_crypt.dll       |\n";
-    std::cout << "|               -> kvc.raw + kvc.dat            |\n";
-    std::cout << "| 2. DECODE: kvc.dat -> kvc.raw +               |\n";
-    std::cout << "|               kvc_pass.exe + kvc_crypt.dll    |\n";
-    std::cout << "| 3. BUILD DISTRIBUTION: kvc.exe + kvc.dat      |\n";
-    std::cout << "|               -> kvc.enc                      |\n";
-    std::cout << "| 4. DECODE DISTRIBUTION: kvc.enc ->            |\n";
-    std::cout << "|               kvc.exe + kvc.dat               |\n";
-    std::cout << "| 5. DECODE EVERYTHING: kvc.enc ->              |\n";
-    std::cout << "|               kvc.exe + kvc_pass.exe +        |\n";
-    std::cout << "|               kvc_crypt.dll                   |\n";
-    std::cout << "==================================================\n\n";
-    std::cout << "kvc.enc is used for remote installation via command:\n";
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+    auto border = [](std::string_view s) { ColorGuard cg(Color::Gray); std::cout << s; };
+    auto label  = [](std::string_view s) { ColorGuard cg(Color::LightYellow); std::cout << s; };
+    auto value  = [](std::string_view s) { ColorGuard cg(Color::LightCyan); std::cout << s; };
+    auto title  = [](std::string_view s) { ColorGuard cg(Color::BrightWhite); std::cout << s; };
+
+    border("╔══════════════════════════════╦══════════════════════════════════════════════════════╗\n");
+    border("║"); title("             TOOL             "); border("║"); title("                 FILE ENCODER/DECODER                 "); border("║\n");
+    border("╠══════════════════════════════╬══════════════════════════════════════════════════════╣\n");
     
-    ColorGuard green(Color::Green);
+    border("║"); label(" 1. ENCODE                    "); border("║"); value(" kvc_pass.exe + kvc_crypt.dll                         "); border("║\n");
+    border("║"); label("                              "); border("║"); value(" -> kvc.raw + kvc.dat                                 "); border("║\n");
+    border("╠══════════════════════════════╬══════════════════════════════════════════════════════╣\n");
+    
+    border("║"); label(" 2. DECODE                    "); border("║"); value(" kvc.dat                                              "); border("║\n");
+    border("║"); label("                              "); border("║"); value(" -> kvc.raw + kvc_pass.exe + kvc_crypt.dll            "); border("║\n");
+    border("╠══════════════════════════════╬══════════════════════════════════════════════════════╣\n");
+    
+    border("║"); label(" 3. BUILD DISTRIBUTION        "); border("║"); value(" kvc.exe + kvc.dat -> kvc.enc                         "); border("║\n");
+    border("╠══════════════════════════════╬══════════════════════════════════════════════════════╣\n");
+    
+    border("║"); label(" 4. DECODE DISTRIBUTION       "); border("║"); value(" kvc.enc -> kvc.exe + kvc.dat                         "); border("║\n");
+    border("╠══════════════════════════════╬══════════════════════════════════════════════════════╣\n");
+    
+    border("║"); label(" 5. DECODE EVERYTHING         "); border("║"); value(" kvc.enc                                              "); border("║\n");
+    border("║"); label("                              "); border("║"); value(" -> kvc.exe + kvc_pass.exe + kvc_crypt.dll            "); border("║\n");
+    border("╠══════════════════════════════╬══════════════════════════════════════════════════════╣\n");
+    
+    border("║"); label(" 6. PACK UNDERVOLTER          "); border("║"); value(" Loader.efi + UnderVolter.efi +                       "); border("║\n");
+    border("║"); label("                              "); border("║"); value(" UnderVolter.ini -> UnderVolter.dat                   "); border("║\n");
+    border("╚══════════════════════════════╩══════════════════════════════════════════════════════╝\n\n");
+
+    std::cout << "kvc.enc is used for remote installation via command:\n";
+
+    ColorGuard green(Color::LightGreen);
     std::cout << "irm https://kvc.pl/run | iex\n\n";
 }
 
 int main() {
     display_menu();
-    std::cout << "Select operation (1-5): ";
+    std::cout << "Select operation (1-6): ";
 
     int choice;
     std::cin >> choice;
@@ -648,9 +722,10 @@ int main() {
         case 3: result = build_distribution(); break;
         case 4: result = decode_distribution(); break;
         case 5: result = decode_everything(); break;
+        case 6: result = encode_undervolter(); break;
         default:
             ColorGuard red(Color::Red);
-            std::cerr << "Invalid choice. Please select 1-5.\n";
+            std::cerr << "Invalid choice. Please select 1-6.\n";
             return 1;
     }
 

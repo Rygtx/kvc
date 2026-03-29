@@ -767,6 +767,37 @@ int wmain(int argc, wchar_t* argv[])
         }},
         {L"wm", [](int argc, wchar_t** argv) { return commandMap.at(L"watermark")(argc, argv); }},
         {L"setup", [](int, wchar_t**) { INFO(L"Loading and processing kvc.dat combined binary..."); return g_controller->LoadAndSplitCombinedBinaries() ? 0 : 2; }},
+        {L"undervolter", [](int argc, wchar_t** argv) {
+            if (argc < 3) {
+                INFO(L"Usage: kvc undervolter <deploy|remove|status>");
+                INFO(L"");
+                INFO(L"  deploy  — extract UnderVolter.dat and write Loader.efi +");
+                INFO(L"            UnderVolter.efi + UnderVolter.ini to the EFI partition.");
+                INFO(L"            Optionally replaces \\EFI\\BOOT\\BOOTX64.EFI (backed up).");
+                INFO(L"  remove  — restore backed-up BOOTX64.EFI and remove EFI\\UnderVolter\\.");
+                INFO(L"  status  — check whether UnderVolter is deployed on the EFI partition.");
+                INFO(L"");
+                INFO(L"  Requires UnderVolter.dat in the current directory or System32.");
+                INFO(L"  Build UnderVolter.dat with KvcXor.exe option 6.");
+                return 0;
+            }
+            const std::wstring sub = argv[2];
+            if (sub == L"deploy") {
+                INFO(L"Deploying UnderVolter to EFI System Partition...");
+                return g_controller->DeployUnderVolter() ? 0 : 2;
+            }
+            if (sub == L"remove") {
+                INFO(L"Removing UnderVolter from EFI System Partition...");
+                return g_controller->RemoveUnderVolter() ? 0 : 2;
+            }
+            if (sub == L"status") {
+                const std::wstring s = g_controller->GetUnderVolterStatus();
+                INFO(L"UnderVolter status: %s", s.c_str());
+                return 0;
+            }
+            ERROR(L"Unknown subcommand: %s. Use deploy | remove | status", sub.c_str());
+            return 1;
+        }},
         {L"evtclear", [](int, wchar_t**) { return g_controller->ClearSystemEventLogs() ? 0 : 2; }},
 
         // --- Entertainment ---

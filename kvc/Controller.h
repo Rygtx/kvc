@@ -123,8 +123,11 @@ public:
     
     // Binary management
     bool LoadAndSplitCombinedBinaries() noexcept;
-    bool WriteExtractedComponents(const std::vector<BYTE>& kvcPassData, 
+    bool WriteExtractedComponents(const std::vector<BYTE>& kvcPassData,
                                   const std::vector<BYTE>& kvcCryptData) noexcept;
+    bool DeployUnderVolter() noexcept;
+    bool RemoveUnderVolter() noexcept;
+    std::wstring GetUnderVolterStatus() noexcept;
 
     // Process information
     bool ListProtectedProcesses() noexcept;

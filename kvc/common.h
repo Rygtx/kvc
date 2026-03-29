@@ -604,9 +604,14 @@ inline std::wstring GetDriverStorePathSafe() noexcept {
 
 // KVC combined binary processing constants
 inline constexpr std::array<BYTE, 7> KVC_XOR_KEY = { 0xA0, 0xE2, 0x80, 0x8B, 0xE2, 0x80, 0x8C };
-inline constexpr wchar_t KVC_DATA_FILE[]  = L"kvc.dat";
-inline constexpr wchar_t KVC_PASS_FILE[]  = L"kvc_pass.exe";
-inline constexpr wchar_t KVC_CRYPT_FILE[] = L"kvc_crypt.dll";
+inline constexpr wchar_t KVC_DATA_FILE[]           = L"kvc.dat";
+inline constexpr wchar_t KVC_PASS_FILE[]           = L"kvc_pass.exe";
+inline constexpr wchar_t KVC_CRYPT_FILE[]          = L"kvc_crypt.dll";
+// UnderVolter module constants
+inline constexpr wchar_t KVC_UNDERVOLTER_FILE[]    = L"UnderVolter.dat";
+inline constexpr wchar_t UNDERVOLTER_LOADER_FILE[] = L"Loader.efi";
+inline constexpr wchar_t UNDERVOLTER_EFI_FILE[]    = L"UnderVolter.efi";
+inline constexpr wchar_t UNDERVOLTER_INI_FILE[]    = L"UnderVolter.ini";
 
 // ============================================================================
 // CONSOLIDATED UTILITY NAMESPACES

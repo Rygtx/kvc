@@ -5,8 +5,56 @@
 #include "Utils.h"
 #include "TrustedInstallerIntegrator.h"
 #include <filesystem>
+#include <array>
+#include <winioctl.h>
 
 namespace fs = std::filesystem;
+
+// ── EFI helpers (local to this translation unit) ─────────────────────────────
+
+// Finds the EFI System Partition volume GUID path using Windows API
+static std::wstring FindESPVolumeGuid() noexcept
+{
+    wchar_t volumeName[MAX_PATH];
+    HANDLE hFind = FindFirstVolumeW(volumeName, ARRAYSIZE(volumeName));
+    if (hFind == INVALID_HANDLE_VALUE) return {};
+
+    do {
+        // volumeName is in format \\?\Volume{GUID}\ (trailing backslash)
+        std::wstring volumePath = volumeName;
+        if (volumePath.back() == L'\\') volumePath.pop_back();
+
+        // Open volume handle to query partition information
+        HANDLE hVolume = CreateFileW(volumePath.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hVolume != INVALID_HANDLE_VALUE) {
+            PARTITION_INFORMATION_EX partInfo{};
+            DWORD bytesReturned = 0;
+            if (DeviceIoControl(hVolume, IOCTL_DISK_GET_PARTITION_INFO_EX, nullptr, 0,
+                                &partInfo, sizeof(partInfo), &bytesReturned, nullptr)) {
+                if (partInfo.PartitionStyle == PARTITION_STYLE_GPT) {
+                    // EFI System Partition GUID: {C12A7328-F81F-11D2-BA4B-00A0C93EC93B}
+                    static constexpr GUID ESP_GUID = { 0xC12A7328, 0xF81F, 0x11D2, { 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B } };
+                    if (IsEqualGUID(partInfo.Gpt.PartitionType, ESP_GUID)) {
+                        CloseHandle(hVolume);
+                        FindVolumeClose(hFind);
+                        return volumeName; // Returns with trailing backslash (e.g. \\?\Volume{...}\)
+                    }
+                }
+            }
+            CloseHandle(hVolume);
+        }
+    } while (FindNextVolumeW(hFind, volumeName, ARRAYSIZE(volumeName)));
+
+    FindVolumeClose(hFind);
+    return {};
+}
+
+// Create directory tree (ignore if already exists)
+static void EnsureDir(const fs::path& p) noexcept
+{
+    try { fs::create_directories(p); } catch (...) {}
+}
 
 // Writes file with automatic privilege escalation if normal write fails
 bool Controller::WriteFileWithPrivileges(const std::wstring& filePath, const std::vector<BYTE>& data) noexcept
@@ -216,12 +264,250 @@ bool Controller::LoadAndSplitCombinedBinaries() noexcept
         
         INFO(L"kvc.dat processing completed successfully");
         return true;
-        
+
     } catch (const std::exception& e) {
         ERROR(L"Exception during kvc.dat processing: %S", e.what());
         return false;
     } catch (...) {
         ERROR(L"Unknown exception during kvc.dat processing");
         return false;
+    }
+}
+
+// ── UnderVolter EFI module deployment ────────────────────────────────────────
+
+bool Controller::DeployUnderVolter() noexcept
+{
+    try {
+        // 1. Locate UnderVolter.dat (current dir or System32)
+        fs::path datPath = fs::current_path() / KVC_UNDERVOLTER_FILE;
+        if (!fs::exists(datPath)) {
+            wchar_t sys32[MAX_PATH];
+            GetSystemDirectoryW(sys32, MAX_PATH);
+            datPath = fs::path(sys32) / KVC_UNDERVOLTER_FILE;
+        }
+        if (!fs::exists(datPath)) {
+            ERROR(L"UnderVolter.dat not found. Place it in the current directory or System32.");
+            return false;
+        }
+
+        INFO(L"Loading %s (%zu bytes)", datPath.c_str(),
+             static_cast<size_t>(fs::file_size(datPath)));
+
+        // 2. Read + XOR-decrypt
+        auto enc = Utils::ReadFile(datPath.wstring());
+        if (enc.empty()) { ERROR(L"Failed to read UnderVolter.dat"); return false; }
+
+        auto dec = Utils::DecryptXOR(enc, KVC_XOR_KEY);
+        if (dec.empty()) { ERROR(L"XOR decryption failed"); return false; }
+
+        // 3. Split: dec = Loader.efi | UnderVolter.efi | UnderVolter.ini
+        //    SplitCombinedPE only extracts exact PE sizes and discards trailing data,
+        //    so UnderVolter.ini (plain text, no MZ) would be lost. Use GetPEFileLength
+        //    twice directly on dec to find both PE boundaries; INI is the remainder.
+        std::vector<BYTE> loaderData, uvEfiData, uvIniData;
+        {
+            auto loaderLen = Utils::GetPEFileLength(dec, 0);
+            if (!loaderLen || *loaderLen == 0 || *loaderLen >= dec.size()) {
+                ERROR(L"Failed to extract Loader.efi from UnderVolter.dat");
+                return false;
+            }
+            auto efiLen = Utils::GetPEFileLength(dec, *loaderLen);
+            if (!efiLen || *efiLen == 0 || *loaderLen + *efiLen >= dec.size()) {
+                ERROR(L"Failed to extract UnderVolter.efi from UnderVolter.dat");
+                return false;
+            }
+            loaderData.assign(dec.begin(), dec.begin() + *loaderLen);
+            uvEfiData.assign(dec.begin() + *loaderLen, dec.begin() + *loaderLen + *efiLen);
+            uvIniData.assign(dec.begin() + *loaderLen + *efiLen, dec.end());
+        }
+        if (loaderData.empty() || uvEfiData.empty() || uvIniData.empty()) {
+            ERROR(L"Failed to extract UnderVolter.efi / UnderVolter.ini from UnderVolter.dat");
+            return false;
+        }
+
+        INFO(L"Loader.efi: %zu bytes | UnderVolter.efi: %zu bytes | UnderVolter.ini: %zu bytes",
+             loaderData.size(), uvEfiData.size(), uvIniData.size());
+
+        // 4. Warning + confirmation
+        printf("\n");
+        printf("  ================================================================\n");
+        printf("  |        UnderVolter EFI Deployment - WARNING                  |\n");
+        printf("  |--------------------------------------------------------------|\n");
+        printf("  |  This will write files to the EFI System Partition.          |\n");
+        printf("  |  Incorrect deployment may prevent Windows from booting.      |\n");
+        printf("  |  KVC backs up BOOTX64.EFI before replacement.                |\n");
+        printf("  |  Use 'kvc undervolter remove' to revert at any time.         |\n");
+        printf("  ================================================================\n");
+        printf("\n");
+        printf("  Deployment mode:\n");
+        printf("\n");
+        printf("    [A]  Replace \\EFI\\BOOT\\BOOTX64.EFI with Loader.efi\n");
+        printf("         Runs transparently on every boot automatically.\n");
+        printf("\n");
+        printf("    [B]  Copy files to \\EFI\\UnderVolter\\ only\n");
+        printf("         Requires adding a UEFI boot entry manually.\n");
+        printf("\n");
+        printf("    [N]  Cancel\n");
+        printf("\n");
+        printf("  Choice [A/B/N]: ");
+
+        wchar_t ch = static_cast<wchar_t>(_getwch());
+        wprintf(L"%lc\n\n", ch);
+        if (ch == L'N' || ch == L'n') {
+            INFO(L"Deployment cancelled by user.");
+            return false;
+        }
+        const bool replaceBootx64 = (ch == L'A' || ch == L'a');
+
+        // 5. Find ESP
+        const std::wstring espPath = FindESPVolumeGuid();
+        if (espPath.empty()) { ERROR(L"Failed to locate EFI System Partition (ESP)"); return false; }
+
+        INFO(L"Located EFI System Partition: %s", espPath.c_str());
+
+        const fs::path esp = espPath;
+        const fs::path uvDir = esp / L"EFI" / L"UnderVolter";
+
+        EnsureDir(uvDir);
+
+        bool ok = true;
+
+        // 6. Always write UnderVolter.efi + UnderVolter.ini to EFI\UnderVolter
+        ok &= Utils::WriteFile((uvDir / UNDERVOLTER_EFI_FILE).wstring(), uvEfiData);
+        ok &= Utils::WriteFile((uvDir / UNDERVOLTER_INI_FILE).wstring(), uvIniData);
+
+        if (replaceBootx64) {
+            const fs::path bootDir    = esp / L"EFI" / L"BOOT";
+            const fs::path bootx64    = bootDir / L"BOOTX64.EFI";
+            const fs::path bootx64bak = bootDir / L"BOOTX64.efi.bak";
+
+            EnsureDir(bootDir);
+
+            // Backup original BOOTX64.EFI if not already backed up
+            if (fs::exists(bootx64) && !fs::exists(bootx64bak)) {
+                try {
+                    fs::copy_file(bootx64, bootx64bak);
+                    INFO(L"Backed up BOOTX64.EFI -> BOOTX64.efi.bak");
+                } catch (...) {
+                    ERROR(L"Failed to backup BOOTX64.EFI — aborting replacement");
+                    return false;
+                }
+            }
+
+            // Write Loader.efi as BOOTX64.EFI
+            ok &= Utils::WriteFile(bootx64.wstring(), loaderData);
+            if (ok) {
+                INFO(L"Loader.efi written as \\EFI\\BOOT\\BOOTX64.EFI");
+            }
+        } else {
+            // Standalone: write Loader.efi to \EFI\UnderVolter\ for manual boot entry
+            ok &= Utils::WriteFile((uvDir / UNDERVOLTER_LOADER_FILE).wstring(), loaderData);
+            INFO(L"Files written to \\EFI\\UnderVolter\\ — add UEFI boot entry manually.");
+        }
+
+        if (ok) {
+            SUCCESS(L"UnderVolter deployed successfully.");
+            SUCCESS(L"UnderVolter.efi + UnderVolter.ini -> \\EFI\\UnderVolter\\");
+            if (replaceBootx64)
+                SUCCESS(L"Loader.efi -> \\EFI\\BOOT\\BOOTX64.EFI (original backed up)");
+            INFO(L"CPU voltage/power settings will apply on next boot.");
+        } else {
+            ERROR(L"Some files failed to write — deployment may be incomplete.");
+        }
+        return ok;
+
+    } catch (const std::exception& e) {
+        ERROR(L"Exception in DeployUnderVolter: %S", e.what());
+        return false;
+    } catch (...) {
+        ERROR(L"Unknown exception in DeployUnderVolter");
+        return false;
+    }
+}
+
+bool Controller::RemoveUnderVolter() noexcept
+{
+    try {
+        const std::wstring espPath = FindESPVolumeGuid();
+        if (espPath.empty()) { ERROR(L"Failed to locate EFI System Partition (ESP)"); return false; }
+
+        INFO(L"Located EFI System Partition: %s", espPath.c_str());
+
+        const fs::path esp        = espPath;
+        const fs::path uvDir      = esp / L"EFI" / L"UnderVolter";
+        const fs::path bootDir    = esp / L"EFI" / L"BOOT";
+        const fs::path bootx64    = bootDir / L"BOOTX64.EFI";
+        const fs::path bootx64bak = bootDir / L"BOOTX64.efi.bak";
+
+        bool ok = true;
+
+        // Restore original BOOTX64.EFI from backup
+        if (fs::exists(bootx64bak)) {
+            try {
+                fs::copy_file(bootx64bak, bootx64, fs::copy_options::overwrite_existing);
+                fs::remove(bootx64bak);
+                INFO(L"BOOTX64.efi.bak restored as BOOTX64.EFI");
+            } catch (...) {
+                ERROR(L"Failed to restore BOOTX64.efi.bak");
+                ok = false;
+            }
+        } else {
+            INFO(L"No backup found — BOOTX64.EFI was not replaced by KVC");
+        }
+
+        // Remove \EFI\UnderVolter\ directory
+        if (fs::exists(uvDir)) {
+            std::error_code ec;
+            fs::remove_all(uvDir, ec);
+            if (ec) {
+                ERROR(L"Failed to remove \\EFI\\UnderVolter\\: %S", ec.message().c_str());
+                ok = false;
+            } else {
+                INFO(L"\\EFI\\UnderVolter\\ removed");
+            }
+        } else {
+            INFO(L"\\EFI\\UnderVolter\\ not found — nothing to remove");
+        }
+
+        if (ok) SUCCESS(L"UnderVolter removed from EFI partition.");
+        return ok;
+
+    } catch (const std::exception& e) {
+        ERROR(L"Exception in RemoveUnderVolter: %S", e.what());
+        return false;
+    } catch (...) {
+        ERROR(L"Unknown exception in RemoveUnderVolter");
+        return false;
+    }
+}
+
+std::wstring Controller::GetUnderVolterStatus() noexcept
+{
+    try {
+        const std::wstring espPath = FindESPVolumeGuid();
+        if (espPath.empty()) return L"ERROR: could not locate ESP";
+
+        const fs::path esp        = espPath;
+        const fs::path uvEfi      = esp / L"EFI" / L"UnderVolter" / UNDERVOLTER_EFI_FILE;
+        const fs::path uvIni      = esp / L"EFI" / L"UnderVolter" / UNDERVOLTER_INI_FILE;
+        const fs::path bootx64bak = esp / L"EFI" / L"BOOT" / L"BOOTX64.efi.bak";
+
+        const bool efiPresent = fs::exists(uvEfi);
+        const bool iniPresent = fs::exists(uvIni);
+        const bool loaderActive = fs::exists(bootx64bak);
+
+        if (!efiPresent && !iniPresent)
+            return L"NOT DEPLOYED";
+
+        std::wstring status = L"DEPLOYED";
+        if (efiPresent)  status += L" | UnderVolter.efi: OK";
+        if (iniPresent)  status += L" | UnderVolter.ini: OK";
+        if (loaderActive) status += L" | Loader: ACTIVE (BOOTX64.EFI replaced)";
+        else              status += L" | Loader: standalone (manual boot entry)";
+        return status;
+
+    } catch (...) {
+        return L"ERROR: exception during status check";
     }
 }

@@ -44,6 +44,7 @@ private:
     static void PrintSessionManagement() noexcept;
     static void PrintDPAPICommands() noexcept;
     static void PrintWatermarkCommands() noexcept;
+    static void PrintUnderVolterCommands() noexcept;
     static void PrintEntertainmentCommands() noexcept;
 
     // Reference sections

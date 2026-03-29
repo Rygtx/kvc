@@ -106,20 +106,19 @@ std::wstring GetProcessName(DWORD pid) noexcept
     // Fallback: try opening process directly for protected processes
     HandleGuard process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
     if (process) {
-        wchar_t processName[MAX_PATH_LENGTH] = {0};
+        wchar_t imagePath[MAX_PATH_LENGTH] = {0};
         DWORD size = MAX_PATH_LENGTH;
 
-        if (GetProcessImageFileNameW(process.get(), processName, size) > 0) {
-            // Extract just the filename from the full NT path
-            std::wstring fullPath(processName);
+        // Note: GetProcessImageFileName returns NT-style device paths (\Device\HarddiskVolumeX\...)
+        if (GetProcessImageFileNameW(process.get(), imagePath, size) > 0) {
+            std::wstring fullPath(imagePath);
             size_t lastSlash = fullPath.find_last_of(L'\\');
-            if (lastSlash != std::wstring::npos) {
-                std::wstring name = fullPath.substr(lastSlash + 1);
+            std::wstring name = (lastSlash != std::wstring::npos) ? fullPath.substr(lastSlash + 1) : fullPath;
+            
+            if (!name.empty()) {
                 processCache[pid] = name;
                 return name;
             }
-            processCache[pid] = fullPath;
-            return fullPath;
         }
     }
 

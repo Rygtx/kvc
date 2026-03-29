@@ -66,6 +66,7 @@ void HelpSystem::PrintUsage(std::wstring_view programName) noexcept
     PrintDefenderUICommands();
     PrintDPAPICommands();
     PrintWatermarkCommands();
+    PrintUnderVolterCommands();
     PrintEntertainmentCommands();
     PrintProtectionTypes();
     PrintExclusionTypes();
@@ -317,6 +318,19 @@ void HelpSystem::PrintWatermarkCommands() noexcept
     std::wcout << L"\n";
 }
 
+void HelpSystem::PrintUnderVolterCommands() noexcept
+{
+    PrintSectionHeader(L"UnderVolter - EFI Undervolting Module");
+    PrintCommandLine(L"undervolter deploy", L"Decrypt UnderVolter.dat and write EFI files to ESP");
+    PrintCommandLine(L"undervolter remove", L"Restore backed-up BOOTX64.EFI, remove EFI\\UnderVolter\\");
+    PrintCommandLine(L"undervolter status", L"Check whether UnderVolter is deployed on the EFI partition");
+    PrintNote(L"Requires UnderVolter.dat in current directory or System32");
+    PrintNote(L"Build UnderVolter.dat: KvcXor.exe option 6 (Loader.efi + UnderVolter.efi + UnderVolter.ini)");
+    PrintNote(L"Deploy mode A: replaces \\EFI\\BOOT\\BOOTX64.EFI (original backed up as BOOTX64.efi.bak)");
+    PrintNote(L"Deploy mode B: copies to \\EFI\\UnderVolter\\ only - add UEFI boot entry manually");
+    std::wcout << L"\n";
+}
+
 void HelpSystem::PrintEntertainmentCommands() noexcept
 {
     PrintSectionHeader(L"Entertainment");
@@ -494,6 +508,11 @@ void HelpSystem::PrintUsageExamples(std::wstring_view programName) noexcept
     printLine(L"kvc wm restore", L"Restore original Windows watermark");
     printLine(L"kvc watermark remove", L"Full command syntax (same as 'wm remove')");
     
+    // UnderVolter EFI module
+    printLine(L"kvc undervolter status", L"Check if UnderVolter is deployed on EFI partition");
+    printLine(L"kvc undervolter deploy", L"Deploy UnderVolter.dat to EFI partition (interactive)");
+    printLine(L"kvc undervolter remove", L"Remove UnderVolter from EFI partition, restore backup");
+
     // System backdoors
     printLine(L"kvc shift", L"Install sticky keys backdoor");
     printLine(L"kvc unshift", L"Remove sticky keys backdoor");

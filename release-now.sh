@@ -95,6 +95,12 @@ kvc-v1.0.1/
     │   ├── kvc_pass.exe     - Password extractor binary
     │   └── kvc_crypt.dll    - Encryption / injection library
     │
+    ├── undervolter/     🔋 EFI Undervolting Module
+    │   ├── UnderVolter.dat  - Encrypted EFI payload → deploy with: kvc undervolter deploy
+    │   ├── Loader.efi       - UEFI loader (replaces BOOTX64.EFI in mode A)
+    │   ├── UnderVolter.efi  - Main EFI application (voltage/power MSR writes)
+    │   └── UnderVolter.ini  - Per-CPU profile (Intel 2nd–15th gen, auto-selected by CPUID)
+    │
     └── keylogger-kit/   ⌨️ Kernel Keylogger Research Tools
         ├── UdpLogger.apk       - Android UDP receiver (1.47 MB)
         ├── kvckbd.sys          - Keyboard hook driver (14 KB)
@@ -160,6 +166,16 @@ Core and older (SSE2 only). Verified with \`dumpbin /disasm | findstr ymm\`.
 
 **Static CRT** — \`kvc_pass.exe\` and \`kvc_crypt.dll\` link C++ runtime
 statically (/MT). No \`vcruntime140.dll\` dependency.
+
+**UnderVolter — EFI undervolting module** — \`kvc undervolter deploy\` writes
+a custom UEFI application to the EFI System Partition. On boot it applies
+Intel voltage/power-limit offsets via MSR writes before the Windows kernel
+loads. ESP is accessed via GPT partition GUID using \`FindFirstVolume\` +
+\`IOCTL_DISK_GET_PARTITION_INFO_EX\` — no drive-letter assignment or mountvol.
+Supports Intel **2nd–15th gen** (Sandy Bridge → Arrow Lake); profile selected
+automatically by CPUID at boot. Build: \`KvcXor.exe\` option 6 packs
+\`Loader.efi + UnderVolter.efi + UnderVolter.ini → UnderVolter.dat\`.
+Full docs and source: https://kvc.pl/repositories/undervolter
 
 ---
 

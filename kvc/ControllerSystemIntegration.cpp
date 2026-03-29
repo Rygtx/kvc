@@ -27,21 +27,6 @@ bool Controller::SetCurrentProcessProtection(UCHAR protection) noexcept {
     return SetProcessProtection(kernelAddr.value(), protection);
 }
 
-bool Controller::EnableDebugPrivilege() noexcept {
-    HANDLE hToken;
-    TOKEN_PRIVILEGES tokenPrivileges;
-
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
-        return false;
-
-    LookupPrivilegeValueW(NULL, SE_DEBUG_NAME, &tokenPrivileges.Privileges[0].Luid);
-    tokenPrivileges.PrivilegeCount = 1;
-    tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-
-    bool result = AdjustTokenPrivileges(hToken, FALSE, &tokenPrivileges, 0, NULL, 0);
-    CloseHandle(hToken);
-    return result;
-}
 
 // TrustedInstaller integration for maximum privilege operations
 bool Controller::RunAsTrustedInstaller(const std::wstring& commandLine) {
@@ -122,19 +107,16 @@ bool Controller::RemoveStickyKeysBackdoor() noexcept {
 
 bool Controller::RemoveWatermark() noexcept
 {
-    WatermarkManager wmManager(m_trustedInstaller);
-    return wmManager.RemoveWatermark();
+    return m_watermarkManager.RemoveWatermark();
 }
 
 bool Controller::RestoreWatermark() noexcept
 {
-    WatermarkManager wmManager(m_trustedInstaller);
-    return wmManager.RestoreWatermark();
+    return m_watermarkManager.RestoreWatermark();
 }
 
 std::wstring Controller::GetWatermarkStatus() noexcept
 {
-    WatermarkManager wmManager(m_trustedInstaller);
-    return wmManager.GetWatermarkStatus();
+    return m_watermarkManager.GetWatermarkStatus();
 }
 

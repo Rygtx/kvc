@@ -305,10 +305,6 @@ const wchar_t* GetSignatureLevelAsString(UCHAR signatureLevel) noexcept
 }
 
 // Section signature uses same mapping as regular signature level
-const wchar_t* GetSectionSignatureLevelAsString(UCHAR sectionSignatureLevel) noexcept
-{
-    return GetSignatureLevelAsString(sectionSignatureLevel);
-}
 
 // Parses protection level string (PP/PPL/None) to enum value
 std::optional<UCHAR> GetProtectionLevelFromString(const std::wstring& levelStr) noexcept
@@ -364,12 +360,6 @@ std::optional<UCHAR> GetSignatureLevel(UCHAR signerType) noexcept
     }
 }
 
-// Returns appropriate section signature level for given signer type
-std::optional<UCHAR> GetSectionSignatureLevel(UCHAR signerType) noexcept
-{
-    // Usually same as signature level for most processes
-    return GetSignatureLevel(signerType);
-}
 
 // ============================================================================
 // MEMORY OPERATION UTILITIES  
@@ -385,7 +375,7 @@ ProcessDumpability CanDumpProcess(DWORD pid, const std::wstring& processName,
 
     // System kernel processes that cannot be dumped under any circumstances
     static const std::unordered_set<DWORD> undumpablePids = {
-        4, 188, 232, 3052
+        4  // System kernel process
     };
 
     static const std::unordered_set<std::wstring> undumpableNames = {
@@ -937,9 +927,6 @@ const wchar_t* GetProcessDisplayColor(UCHAR signerType, UCHAR signatureLevel,
     
     return ProcessColors::YELLOW;
 }
-
-#include <fdi.h>
-#pragma comment(lib, "cabinet.lib")
 
 // ============================================================================
 // CAB DECOMPRESSION

@@ -1,223 +1,77 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="Source Files">
-      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
-    </Filter>
-    <Filter Include="Header Files">
-      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
-    </Filter>
-    <Filter Include="Resource Files">
-      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
-      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
-    </Filter>
-    <Filter Include="Source Files\Controller">
-      <UniqueIdentifier>{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="Source Files\Tetris">
-      <UniqueIdentifier>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</UniqueIdentifier>
-    </Filter>
+    <ClCompile Include="TrustedInstallerIntegrator.cpp" />
+    <ClCompile Include="WmiDefenderClient.cpp" />
+    <ClCompile Include="ControllerCore.cpp" />
+    <ClCompile Include="DSEBypass.cpp" />
+    <ClCompile Include="SymbolEngine.cpp" />
+    <ClCompile Include="ControllerDSE.cpp" />
+    <ClCompile Include="ControllerBinaryManager.cpp" />
+    <ClCompile Include="ControllerDriverManager.cpp" />
+    <ClCompile Include="ControllerDriverLoader.cpp" />
+    <ClCompile Include="ControllerProcessOperations.cpp" />
+    <ClCompile Include="ControllerMemoryOperations.cpp" />
+    <ClCompile Include="ControllerSystemIntegration.cpp" />
+    <ClCompile Include="ControllerPasswordManager.cpp" />
+    <ClCompile Include="ControllerEventLogOperations.cpp" />
+    <ClCompile Include="ControllerModuleOperations.cpp" />
+    <ClCompile Include="ProcessManager.cpp" />
+    <ClCompile Include="ProcessListGUI.cpp" />
+    <ClCompile Include="ModuleManager.cpp" />
+    <ClCompile Include="OffsetFinder.cpp" />
+    <ClCompile Include="kvc.cpp" />
+    <ClCompile Include="kvcDrv.cpp" />
+    <ClCompile Include="Utils.cpp" />
+    <ClCompile Include="Common.cpp" />
+    <ClCompile Include="WatermarkManager.cpp" />
+    <ClCompile Include="HiveManager.cpp" />
+    <ClCompile Include="ReportExporter.cpp" />
+    <ClCompile Include="SessionManager.cpp" />
+    <ClCompile Include="ServiceManager.cpp" />
+    <ClCompile Include="DefenderManager.cpp" />
+    <ClCompile Include="DefenderStealth.cpp" />
+    <ClCompile Include="DefenderUI.cpp" />
+    <ClCompile Include="HelpSystem.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="kvc.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="OffsetFinder.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="kvcDrv.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Utils.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Common.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="TrustedInstallerIntegrator.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="ReportExporter.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerCore.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerDriverManager.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerDriverLoader.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerProcessOperations.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerMemoryOperations.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerSystemIntegration.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerPasswordManager.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="DSEBypass.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="SymbolEngine.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerDSE.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerBinaryManager.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerEventLogOperations.cpp">
-      <Filter>Source Files\Controller</Filter>
-    </ClCompile>
-    <ClCompile Include="ProcessManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="ProcessListGUI.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="WatermarkManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="HiveManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="SessionManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="ServiceManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="WmiDefenderClient.cpp">
-      <Filter>Source Files</Filter>
-    <ClCompile Include="DefenderManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DefenderStealth.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DefenderUI.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="HelpSystem.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="ControllerModuleOperations.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="ModuleManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
+    <ClInclude Include="ProcessListGUI_res.h" />
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="TrustedInstallerIntegrator.h" />
+    <ClInclude Include="WmiDefenderClient.h" />
+    <ClInclude Include="common.h" />
+    <ClInclude Include="DSEBypass.h" />
+    <ClInclude Include="SymbolEngine.h" />
+    <ClInclude Include="Controller.h" />
+    <ClInclude Include="OffsetFinder.h" />
+    <ClInclude Include="kvcDrv.h" />
+    <ClInclude Include="Utils.h" />
+    <ClInclude Include="WatermarkManager.h" />
+    <ClInclude Include="HiveManager.h" />
+    <ClInclude Include="ReportExporter.h" />
+    <ClInclude Include="SessionManager.h" />
+    <ClInclude Include="ServiceManager.h" />
+    <ClInclude Include="HelpSystem.h" />
+    <ClInclude Include="ProcessListGUI.h" />
+    <ClInclude Include="DefenderManager.h" />
+    <ClInclude Include="DefenderStealth.h" />
+    <ClInclude Include="DefenderUI.h" />
+    <ClInclude Include="ProcessManager.h" />
+    <ClInclude Include="ModuleManager.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="OffsetFinder.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="common.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="kvcDrv.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Utils.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="Controller.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="TrustedInstallerIntegrator.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="resource.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="ReportExporter.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DSEBypass.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="SymbolEngine.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="WatermarkManager.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="HiveManager.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="SessionManager.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="ServiceManager.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="HelpSystem.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="ProcessListGUI.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="WmiDefenderClient.h">
-      <Filter>Header Files</Filter>
-    <ClInclude Include="DefenderManager.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DefenderStealth.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="DefenderUI.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="ProcessManager.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="ModuleManager.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="ProcessListGUI_res.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
+    <ResourceCompile Include="kvc.rc" />
+    <ResourceCompile Include="ProcessListDialog.rc" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="ICON\kvc.ico">
-      <Filter>Resource Files</Filter>
-    </Image>
+    <Image Include="ICON\kvc.ico" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="kvc.rc">
-      <Filter>Resource Files</Filter>
-    </ResourceCompile>
-    <ResourceCompile Include="ProcessListDialog.rc">
-      <Filter>Resource Files</Filter>
-    </ResourceCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <MASM Include="MmPoolTelemetry.asm">
-      <Filter>Source Files</Filter>
-    </MASM>
-    <MASM Include="ScreenShake.asm">
-      <Filter>Source Files</Filter>
-    </MASM>
-    <MASM Include="addons\main.asm">
-      <Filter>Source Files\Tetris</Filter>
-    </MASM>
-    <MASM Include="addons\game.asm">
-      <Filter>Source Files\Tetris</Filter>
-    </MASM>
-    <MASM Include="addons\render.asm">
-      <Filter>Source Files\Tetris</Filter>
-    </MASM>
-    <MASM Include="addons\registry.asm">
-      <Filter>Source Files\Tetris</Filter>
-    </MASM>
+    <MASM Include="MmPoolTelemetry.asm" />
+    <MASM Include="ScreenShake.asm" />
+    <MASM Include="addons\main.asm" />
+    <MASM Include="addons\game.asm" />
+    <MASM Include="addons\render.asm" />
+    <MASM Include="addons\registry.asm" />
   </ItemGroup>
 </Project>

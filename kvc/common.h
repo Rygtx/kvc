@@ -503,18 +503,6 @@ namespace DPAPIConstants {
     inline constexpr int SQLITE_DONE = 101;
     inline constexpr int SQLITE_OPEN_READONLY = 0x00000001;
     
-    inline std::string GetChromeV10Prefix() { return "v10"; }
-    inline std::string GetChromeDPAPIPrefix() { return "DPAPI"; }
-    
-    inline std::wstring GetSecurityPolicySecrets() { return L"SECURITY\\Policy\\Secrets"; }
-    inline std::wstring GetDPAPISystemKey() { return L"DPAPI_SYSTEM"; }
-    inline std::wstring GetNLKMKey() { return L"NL$KM"; }
-    inline std::wstring GetDefaultPasswordKey() { return L"DefaultPassword"; }
-    
-    inline std::wstring GetCurrVal() { return L"CurrVal"; }
-    inline std::wstring GetOldVal() { return L"OldVal"; }
-    
-    inline std::wstring GetChromeUserData() { return L"\\Google\\Chrome\\User Data"; }
     inline std::wstring GetEdgeUserData() { return L"\\Microsoft\\Edge\\User Data"; }
     inline std::wstring GetLocalStateFile() { return L"\\Local State"; }
     inline std::wstring GetLoginDataFile() { return L"\\Login Data"; }
@@ -523,27 +511,16 @@ namespace DPAPIConstants {
     
     inline std::string GetLocalAppData() { return "LOCALAPPDATA"; }
     
-    inline std::wstring GetHTMLExt() { return L".html"; }
-    inline std::wstring GetTXTExt() { return L".txt"; }
-    inline std::wstring GetDBExt() { return L".db"; }
-    
     inline std::wstring GetTempLoginDB() { return L"temp_login_data.db"; }
     inline std::wstring GetTempPattern() { return L"temp_login_data"; }
     
     inline std::string GetNetshShowProfiles() { return "netsh wlan show profiles"; }
-    inline std::string GetNetshShowProfileKey() { return "netsh wlan show profile name=\""; }
-    inline std::string GetNetshKeyClear() { return "\" key=clear"; }
     
     inline std::string GetWiFiProfileMarker() { return "All User Profile"; }
-    inline std::string GetWiFiKeyContent() { return "Key Content"; }
     
     inline std::string GetLoginQuery() { return "SELECT origin_url, username_value, password_value FROM logins"; }
     
     inline std::wstring GetStatusDecrypted() { return L"DECRYPTED"; }
-    inline std::wstring GetStatusClearText() { return L"CLEAR_TEXT"; }
-    inline std::wstring GetStatusEncrypted() { return L"ENCRYPTED"; }
-    inline std::wstring GetStatusFailed() { return L"FAILED"; }
-    inline std::wstring GetStatusExtracted() { return L"EXTRACTED"; }
 }
 
 // Dynamic API loading globals for driver operations
@@ -563,7 +540,6 @@ extern volatile bool g_interrupted;
 
 // Core driver functions
 bool InitDynamicAPIs() noexcept;
-extern "C" const wchar_t* GetServiceNameRaw();
 std::wstring GetServiceName() noexcept;
 std::wstring GetDriverFileName() noexcept;
 std::wstring GetSystemTempPath() noexcept;
@@ -638,6 +614,17 @@ inline constexpr wchar_t KVC_CRYPT_FILE[] = L"kvc_crypt.dll";
 
 // String conversion and manipulation utilities
 namespace StringUtils {
+    // Convert wide string to lowercase in-place
+    inline void ToLower(std::wstring& s) noexcept {
+        std::transform(s.begin(), s.end(), s.begin(), ::towlower);
+    }
+
+    // Return lowercase copy of wide string
+    inline std::wstring ToLowerCopy(std::wstring s) noexcept {
+        ToLower(s);
+        return s;
+    }
+
     // Convert UTF-8 string to wide string (UTF-16 LE)
     inline std::wstring UTF8ToWide(const std::string& str) noexcept {
         if (str.empty()) return L"";

@@ -856,7 +856,7 @@ bool TrustedInstallerIntegrator::ValidateIpAddress(std::wstring_view ipAddress) 
 std::wstring TrustedInstallerIntegrator::NormalizeExtension(std::wstring_view extension) noexcept
 {
     std::wstring normalized{extension};
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::towlower);
+    StringUtils::ToLower(normalized);
     
     if (!normalized.empty() && normalized[0] != L'.') {
         normalized = L"." + normalized;

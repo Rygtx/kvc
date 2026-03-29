@@ -167,7 +167,7 @@ bool Controller::CreateMiniDump(DWORD pid, const std::wstring& outputPath) noexc
     }
 
     // Try to enable debug privilege - auxiliary feature
-    if (!EnableDebugPrivilege()) {
+    if (!PrivilegeUtils::EnablePrivilege(SE_DEBUG_NAME)) {
         INFO(L"Debug privilege failed (continuing with dump anyway)");
     }
 

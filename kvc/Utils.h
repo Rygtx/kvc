@@ -83,18 +83,6 @@ namespace Utils
         return (signerType << 4) | protectionLevel;
     }
     
-    // Extract signature level value (lower 4 bits)
-    constexpr UCHAR GetSignatureLevelValue(UCHAR signatureLevel) noexcept
-    {
-        return signatureLevel & 0x0F; 
-    }
-    
-    // Extract section signature level value (lower 4 bits)
-    constexpr UCHAR GetSectionSignatureLevelValue(UCHAR sectionSignatureLevel) noexcept
-    {
-        return sectionSignatureLevel & 0x0F;
-    }
-    
     // ============================================================================
     // PROTECTION LEVEL STRING CONVERSIONS
     // ============================================================================
@@ -102,7 +90,6 @@ namespace Utils
     const wchar_t* GetProtectionLevelAsString(UCHAR protectionLevel) noexcept;
     const wchar_t* GetSignerTypeAsString(UCHAR signerType) noexcept;
     const wchar_t* GetSignatureLevelAsString(UCHAR signatureLevel) noexcept;
-    const wchar_t* GetSectionSignatureLevelAsString(UCHAR sectionSignatureLevel) noexcept;
     
     // ============================================================================
     // STRING TO ENUM PARSING
@@ -111,7 +98,6 @@ namespace Utils
     std::optional<UCHAR> GetProtectionLevelFromString(const std::wstring& protectionLevel) noexcept;
     std::optional<UCHAR> GetSignerTypeFromString(const std::wstring& signerType) noexcept;
     std::optional<UCHAR> GetSignatureLevel(UCHAR signerType) noexcept;
-    std::optional<UCHAR> GetSectionSignatureLevel(UCHAR signerType) noexcept;
     
     // ============================================================================
     // PROCESS DUMPABILITY ANALYSIS

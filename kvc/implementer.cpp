@@ -234,11 +234,15 @@ ResultVoid write_file_winapi(const std::string& filename, std::span<const uint8_
 }
 
 // XOR operation
+// Auto-vectorization disabled: MSVC generates AVX2 (vpermd/vpsllvd) for i%key.size()
+// which crashes on CPUs without AVX2 support (pre-Haswell / Ivy Bridge and older).
+#pragma optimize("", off)
 void xor_data(std::span<uint8_t> data, std::span<const uint8_t> key) noexcept {
     for (size_t i = 0; i < data.size(); ++i) {
         data[i] ^= key[i % key.size()];
     }
 }
+#pragma optimize("", on)
 
 // Read INI configuration
 Result<Config> read_config(const std::string& config_path) {

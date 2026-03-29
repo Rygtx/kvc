@@ -21,12 +21,13 @@ class HelpSystem
 public:
     static void PrintUsage(std::wstring_view programName) noexcept;
     static void PrintUnknownCommandMessage(std::wstring_view command) noexcept;
+    static void PrintBrowserCommands() noexcept;
 
 private:
     // Main sections
     static void PrintHeader() noexcept;
     static void PrintFooter() noexcept;
-    
+
     // Command categories
     static void PrintServiceCommands() noexcept;
     static void PrintDSECommands() noexcept;
@@ -37,7 +38,6 @@ private:
     static void PrintProtectionCommands() noexcept;
     static void PrintSystemCommands() noexcept;
     static void PrintRegistryCommands() noexcept;
-    static void PrintBrowserCommands() noexcept;
     static void PrintDefenderCommands() noexcept;
     static void PrintSecurityEngineCommands() noexcept;
     static void PrintDefenderUICommands() noexcept;

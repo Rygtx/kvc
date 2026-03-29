@@ -35,7 +35,7 @@ public:
 
     // === Configuration Constants ===
 
-    static constexpr const wchar_t* SERVICE_NAME = L"KernelVulnerabilityControl";
+    static constexpr const wchar_t* SERVICE_NAME = ServiceConstants::SERVICE_NAME;
     static constexpr const wchar_t* SERVICE_DISPLAY_NAME = L"Kernel Vulnerability Capabilities Framework";
     static constexpr const wchar_t* SERVICE_DESCRIPTION = L"Provides kernel-level process protection and vulnerability assessment capabilities";
 

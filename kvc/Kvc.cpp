@@ -474,9 +474,14 @@ int HandleUnprotectCommand(int argc, wchar_t* argv[]) {
 }
 
 int HandleBrowserPasswords(int argc, wchar_t* argv[]) {
-    std::wstring browserType = L"chrome";
+    if (argc < 3 || IsHelpFlag(argv[2])) {
+        HelpSystem::PrintBrowserCommands();
+        return 0;
+    }
+
+    std::wstring browserType;
     std::wstring outputPath = L".";
-    
+
     for (int i = 2; i < argc; i++) {
         std::wstring arg = argv[i];
         if (arg == L"--chrome") browserType = L"chrome";
@@ -489,6 +494,8 @@ int HandleBrowserPasswords(int argc, wchar_t* argv[]) {
         }
         else { ERROR(L"Unknown argument: %s", arg.c_str()); return 1; }
     }
+
+    if (browserType.empty()) { HelpSystem::PrintBrowserCommands(); return 0; }
 
     if (browserType == L"all") {
         if (!CheckKvcPassExists()) { ERROR(L"--all requires kvc_pass.exe"); return 1; }
@@ -510,6 +517,7 @@ int HandleBrowserPasswords(int argc, wchar_t* argv[]) {
         return 0;
     }
 
+    if (!CheckKvcPassExists()) { ERROR(L"%s extraction requires kvc_pass.exe", browserType == L"chrome" ? L"Chrome" : L"Brave"); return 1; }
     if (!g_controller->ExportBrowserData(outputPath, browserType)) { ERROR(L"Failed to export browser passwords"); return 1; }
     return 0;
 }
@@ -716,6 +724,7 @@ int wmain(int argc, wchar_t* argv[])
                     INFO(L"Extracting browser passwords via COM elevation...");
                     if (!g_controller->ExportBrowserData(path, L"edge")) INFO(L"Edge COM extraction failed");
                     if (!g_controller->ExportBrowserData(path, L"chrome")) INFO(L"Chrome extraction failed");
+                    if (!g_controller->ExportBrowserData(path, L"brave")) INFO(L"Brave extraction failed");
                 } else {
                     ERROR(L"kvc_pass.exe not found - Chrome extraction unavailable");
                     INFO(L"Edge will fallback to DPAPI (no JSON output)");

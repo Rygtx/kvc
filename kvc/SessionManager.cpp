@@ -350,8 +350,7 @@ std::vector<SessionEntry> SessionManager::LoadSessionEntries(const std::wstring&
 {
     // Normalize signer name for case-insensitive comparison
     std::wstring normalizedSigner = signerName;
-    std::transform(normalizedSigner.begin(), normalizedSigner.end(), 
-                   normalizedSigner.begin(), ::towlower);
+    StringUtils::ToLower(normalizedSigner);
     
     std::wstring sessionPath = GetSessionPath(GetCurrentBootSession());
     
@@ -374,8 +373,7 @@ std::vector<SessionEntry> SessionManager::LoadSessionEntries(const std::wstring&
         
         std::wstring candidate = subKeyName;
         std::wstring normalizedCandidate = candidate;
-        std::transform(normalizedCandidate.begin(), normalizedCandidate.end(), 
-                       normalizedCandidate.begin(), ::towlower);
+        StringUtils::ToLower(normalizedCandidate);
         
         if (normalizedCandidate == normalizedSigner) {
             foundSignerKey = candidate;
@@ -473,8 +471,7 @@ bool SessionManager::RestoreBySigner(const std::wstring& signerName, Controller*
     
     // Find actual signer key name in registry (case-insensitive search)
     std::wstring normalizedSigner = signerName;
-    std::transform(normalizedSigner.begin(), normalizedSigner.end(), 
-                   normalizedSigner.begin(), ::towlower);
+    StringUtils::ToLower(normalizedSigner);
     
     std::wstring sessionPath = GetSessionPath(GetCurrentBootSession());
     
@@ -500,8 +497,7 @@ bool SessionManager::RestoreBySigner(const std::wstring& signerName, Controller*
         
         std::wstring candidate = subKeyName;
         std::wstring normalizedCandidate = candidate;
-        std::transform(normalizedCandidate.begin(), normalizedCandidate.end(), 
-                       normalizedCandidate.begin(), ::towlower);
+        StringUtils::ToLower(normalizedCandidate);
         
         if (normalizedCandidate == normalizedSigner) {
             foundSignerKey = candidate;

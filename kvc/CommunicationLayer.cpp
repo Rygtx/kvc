@@ -8,7 +8,7 @@
 
 #pragma comment(lib, "Rpcrt4.lib")
 
-constexpr DWORD MODULE_COMPLETION_TIMEOUT_MS = 10000;
+constexpr DWORD MODULE_COMPLETION_TIMEOUT_MS = 60000;
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
@@ -150,7 +150,7 @@ void PipeCommunicator::create()
 {
     m_pipeHandle.reset(CreateNamedPipeW(m_pipeName.c_str(), PIPE_ACCESS_DUPLEX,
                                       PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-                                      1, 4096, 4096, 0, nullptr));
+                                      1, 65536, 65536, 0, nullptr));
     if (!m_pipeHandle)
         throw std::runtime_error("CreateNamedPipeW failed. Error: " + std::to_string(GetLastError()));
 

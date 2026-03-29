@@ -47,6 +47,8 @@ namespace HTMLStyles {
         StyleRule{ ".password", "background:#ffe6e6;font-family:'Consolas',monospace;font-size:14px" },
         StyleRule{ ".status-decrypted", "color:#27ae60;font-weight:bold" },
         StyleRule{ ".status-extracted", "color:#ffc107;font-weight:bold" },
+        StyleRule{ ".status-module", "color:#e67e22;font-weight:bold" },
+        StyleRule{ ".needs-module", "background:#fff3cd;color:#856404;font-style:italic;font-size:13px" },
         StyleRule{ ".hex-data", "font-family:'Consolas','Monaco',monospace;font-size:11px;word-break:break-all;background:#f8f9fa;padding:4px 8px;border-radius:4px" },
     };
     
@@ -314,18 +316,28 @@ std::string ReportExporter::BuildPasswordsTable(const ReportData& data) noexcept
     table << "            <tbody>";
     
     for (const auto& result : data.passwordResults) {
-        if (result.type.find(L"Chrome") != std::wstring::npos || 
+        if (result.type.find(L"Chrome") != std::wstring::npos ||
             result.type.find(L"Edge") != std::wstring::npos) {
-            
+
             std::string cssClass = result.type.find(L"Chrome") != std::wstring::npos ? "chrome" : "edge";
-            
+            std::string passUtf8 = StringUtils::WideToUTF8(result.password);
+
+            // Detect undecrypted AES-GCM blob (v10/v20 prefix = raw encrypted bytes)
+            bool needsModule = passUtf8.size() > 16 &&
+                               (passUtf8.substr(0,3) == "v10" || passUtf8.substr(0,3) == "v20");
+
             table << "                <tr class=\"" << cssClass << "\">\n";
             table << "                    <td>" << StringUtils::WideToUTF8(result.type) << "</td>\n";
             table << "                    <td>" << StringUtils::WideToUTF8(result.profile) << "</td>\n";
             table << "                    <td>" << StringUtils::WideToUTF8(result.url) << "</td>\n";
             table << "                    <td>" << StringUtils::WideToUTF8(result.username) << "</td>\n";
-            table << "                    <td class=\"password\">" << StringUtils::WideToUTF8(result.password) << "</td>\n";
-            table << "                    <td class=\"status-decrypted\">" << StringUtils::WideToUTF8(result.status) << "</td>\n";
+            if (needsModule) {
+                table << "                    <td class=\"needs-module\">&#128274; Requires kvc.dat module for full decryption</td>\n";
+                table << "                    <td class=\"status-module\">ENCRYPTED</td>\n";
+            } else {
+                table << "                    <td class=\"password\">" << passUtf8 << "</td>\n";
+                table << "                    <td class=\"status-decrypted\">" << StringUtils::WideToUTF8(result.status) << "</td>\n";
+            }
             table << "                </tr>\n";
         }
     }
@@ -415,14 +427,24 @@ std::wstring ReportExporter::BuildTXTPasswords(const ReportData& data) noexcept
     
     section << L"=== BROWSER PASSWORDS ===\n";
     for (const auto& result : data.passwordResults) {
-        if (result.type.find(L"Chrome") != std::wstring::npos || 
+        if (result.type.find(L"Chrome") != std::wstring::npos ||
             result.type.find(L"Edge") != std::wstring::npos) {
+
+            // Detect undecrypted AES-GCM blob (v10/v20 prefix = raw encrypted bytes)
+            bool needsModule = result.password.size() > 16 &&
+                               (result.password.substr(0,3) == L"v10" || result.password.substr(0,3) == L"v20");
+
             section << L"Browser: " << result.type << L"\n";
             section << L"Profile: " << result.profile << L"\n";
             section << L"URL: " << result.url << L"\n";
             section << L"Username: " << result.username << L"\n";
-            section << L"Password: " << result.password << L"\n";
-            section << L"Status: " << result.status << L"\n";
+            if (needsModule) {
+                section << L"Password: [ENCRYPTED - requires kvc.dat module for full decryption]\n";
+                section << L"Status: ENCRYPTED\n";
+            } else {
+                section << L"Password: " << result.password << L"\n";
+                section << L"Status: " << result.status << L"\n";
+            }
             section << L"---------------------------------\n";
         }
     }

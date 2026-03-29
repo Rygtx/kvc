@@ -89,6 +89,15 @@ bool Controller::ShowPasswords(const std::wstring& outputPath) noexcept
         INFO(L"Chrome password extraction failed, continuing with Edge and WiFi");
         // Continue anyway - Chrome failure shouldn't break the rest
     }
+
+    // Process Edge v10/v20 passwords through kvc_pass (app-bound encryption, DPAPI gives raw blob)
+    INFO(L"Edge app-bound passwords require COM elevation - delegating to kvc_pass...");
+    if (ExportBrowserData(finalOutputPath, L"edge")) {
+        // Merge decrypted results back into passwordResults, replacing v10/v20 placeholders
+        MergeKvcPassResults(finalOutputPath, L"Edge", passwordResults);
+    } else {
+        INFO(L"Edge kvc_pass extraction failed, v10/v20 passwords remain as placeholders");
+    }
     
     if (g_interrupted) {
         INFO(L"Password extraction cancelled during Chrome processing");
@@ -303,7 +312,7 @@ bool Controller::ParseRegFileForSecrets(const std::wstring& regFilePath, std::ve
                 RegistryMasterKey masterKey;
                 masterKey.keyName = L"HKLM\\" + currentKeyPath;
                 
-                if (ConvertHexStringToBytes(hexData, masterKey.encryptedData)) {
+                if (Utils::HexStringToBytes(hexData, masterKey.encryptedData)) {
                     masterKeys.push_back(masterKey);
                     extractedCount++;
                     SUCCESS(L"Extracted LSA secret: %s (%d bytes)", 
@@ -352,7 +361,7 @@ bool Controller::ParseRegFileForSecrets(const std::wstring& regFilePath, std::ve
         RegistryMasterKey masterKey;
         masterKey.keyName = L"HKLM\\" + currentKeyPath;
         
-        if (ConvertHexStringToBytes(hexData, masterKey.encryptedData)) {
+        if (Utils::HexStringToBytes(hexData, masterKey.encryptedData)) {
             masterKeys.push_back(masterKey);
             extractedCount++;
             SUCCESS(L"Extracted final LSA secret: %s (%d bytes)", 
@@ -363,35 +372,6 @@ bool Controller::ParseRegFileForSecrets(const std::wstring& regFilePath, std::ve
     return extractedCount > 0;
 }
 
-bool Controller::ConvertHexStringToBytes(const std::wstring& hexString, std::vector<BYTE>& bytes) noexcept 
-{
-    std::wstring cleanHex;
-    cleanHex.reserve(hexString.length());
-    
-    for (wchar_t c : hexString) {
-        if ((c >= L'0' && c <= L'9') || 
-            (c >= L'a' && c <= L'f') || 
-            (c >= L'A' && c <= L'F')) {
-            cleanHex += c;
-        }
-    }
-    
-    if (cleanHex.length() % 2 != 0) {
-        ERROR(L"Invalid hex string length: %d", static_cast<int>(cleanHex.length()));
-        return false;
-    }
-    
-    bytes.clear();
-    bytes.reserve(cleanHex.length() / 2);
-    
-    for (size_t i = 0; i < cleanHex.length(); i += 2) {
-        wchar_t* endPtr;
-        BYTE byteVal = static_cast<BYTE>(std::wcstoul(cleanHex.substr(i, 2).c_str(), &endPtr, 16));
-        bytes.push_back(byteVal);
-    }
-    
-    return true;
-}
 
 // Decrypt LSA secrets using CryptUnprotectData for display purposes
 bool Controller::ProcessRegistryMasterKeys(std::vector<RegistryMasterKey>& masterKeys) noexcept 
@@ -911,4 +891,99 @@ bool Controller::ExportBrowserData(const std::wstring& outputPath, const std::ws
     
     SUCCESS(L"Browser passwords extracted successfully using kvc_pass");
     return true;
+}
+
+// Reads kvc_pass JSON output and merges decrypted passwords into passwordResults.
+// Replaces v10/v20 placeholders with actual passwords; adds new entries if no match found.
+void Controller::MergeKvcPassResults(const std::wstring& outputPath,
+                                     const std::wstring& browserName,
+                                     std::vector<PasswordResult>& results) noexcept
+{
+    std::wstring browserDir = outputPath + L"\\" + browserName;
+    if (!fs::exists(browserDir))
+        return;
+
+    for (const auto& profileEntry : fs::directory_iterator(browserDir)) {
+        if (!profileEntry.is_directory())
+            continue;
+
+        auto jsonPath = profileEntry.path() / L"passwords.json";
+        if (!fs::exists(jsonPath))
+            continue;
+
+        std::ifstream jsonFile(jsonPath);
+        if (!jsonFile.is_open())
+            continue;
+
+        std::string json((std::istreambuf_iterator<char>(jsonFile)),
+                          std::istreambuf_iterator<char>());
+
+        // Parse each {"origin":"...","username":"...","password":"..."} entry
+        size_t pos = 0;
+        while ((pos = json.find("{\"origin\":\"", pos)) != std::string::npos) {
+            auto readField = [&](const std::string& key, size_t from) -> std::pair<std::string, size_t> {
+                std::string needle = "\"" + key + "\":\"";
+                size_t p = json.find(needle, from);
+                if (p == std::string::npos) return {"", from};
+                p += needle.size();
+                std::string val;
+                while (p < json.size()) {
+                    if (json[p] == '\\' && p + 1 < json.size()) {
+                        char c = json[p + 1];
+                        if (c == '"') val += '"';
+                        else if (c == '\\') val += '\\';
+                        else if (c == 'n') val += '\n';
+                        else val += c;
+                        p += 2;
+                    } else if (json[p] == '"') { ++p; break; }
+                    else val += json[p++];
+                }
+                return {val, p};
+            };
+
+            auto [origin,   p1] = readField("origin",   pos);
+            auto [username, p2] = readField("username", pos);
+            auto [password, p3] = readField("password", pos);
+
+            pos = json.find('}', pos);
+            if (pos != std::string::npos) ++pos;
+
+            if (origin.empty() || password.empty())
+                continue;
+
+            std::wstring wOrigin   = StringUtils::UTF8ToWide(origin);
+            std::wstring wUsername = StringUtils::UTF8ToWide(username);
+            std::wstring wPassword = StringUtils::UTF8ToWide(password);
+
+            // Try to update an existing v10/v20 placeholder entry
+            bool merged = false;
+            for (auto& r : results) {
+                if (r.type.find(browserName) == std::wstring::npos) continue;
+                if (r.url != wOrigin || r.username != wUsername) continue;
+
+                std::string blob = StringUtils::WideToUTF8(r.password);
+                bool isBlob = blob.size() > 3 &&
+                              (blob.substr(0, 3) == "v10" || blob.substr(0, 3) == "v20");
+                if (!isBlob) continue;
+
+                r.password = wPassword;
+                r.status   = DPAPIConstants::GetStatusDecrypted();
+                merged = true;
+                break;
+            }
+
+            if (!merged) {
+                PasswordResult nr;
+                nr.type     = browserName + L"-LoginData";
+                nr.profile  = profileEntry.path().filename().wstring();
+                nr.url      = wOrigin;
+                nr.username = wUsername;
+                nr.password = wPassword;
+                nr.status   = DPAPIConstants::GetStatusDecrypted();
+                results.push_back(nr);
+            }
+        }
+    }
+
+    INFO(L"MergeKvcPassResults: merged kvc_pass passwords for %s", browserName.c_str());
 }

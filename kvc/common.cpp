@@ -87,42 +87,6 @@ bool InitDynamicAPIs() noexcept
            g_pDeleteService && g_pCreateFileW && g_pControlService;
 }
 
-class ServiceHandle {
-private:
-    SC_HANDLE handle_;
-    
-public:
-    explicit ServiceHandle(SC_HANDLE handle = nullptr) noexcept : handle_(handle) {}
-    
-    ~ServiceHandle() noexcept {
-        if (handle_) {
-            CloseServiceHandle(handle_);
-        }
-    }
-    
-    ServiceHandle(ServiceHandle&& other) noexcept : handle_(other.handle_) {
-        other.handle_ = nullptr;
-    }
-    
-    ServiceHandle& operator=(ServiceHandle&& other) noexcept {
-        if (this != &other) {
-            if (handle_) {
-                CloseServiceHandle(handle_);
-            }
-            handle_ = other.handle_;
-            other.handle_ = nullptr;
-        }
-        return *this;
-    }
-    
-    ServiceHandle(const ServiceHandle&) = delete;
-    ServiceHandle& operator=(const ServiceHandle&) = delete;
-    
-    operator SC_HANDLE() const noexcept { return handle_; }
-    explicit operator bool() const noexcept { return handle_ != nullptr; }
-    SC_HANDLE get() const noexcept { return handle_; }
-};
-
 // Checks if service registry entry exists by attempting to open it
 bool IsServiceInstalled() noexcept 
 {
@@ -131,13 +95,13 @@ bool IsServiceInstalled() noexcept
         return false;
     }
     
-    ServiceHandle scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+    SCManagerGuard scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
     if (!scm) {
         DEBUG(L"OpenSCManager failed: %d", GetLastError());
         return false;
     }
 
-    ServiceHandle service(g_pOpenServiceW(scm, ServiceManager::SERVICE_NAME, SERVICE_QUERY_STATUS));
+    ServiceHandleGuard service(g_pOpenServiceW(scm.get(), ServiceManager::SERVICE_NAME, SERVICE_QUERY_STATUS));
     
     return static_cast<bool>(service);
 }
@@ -150,20 +114,20 @@ bool IsServiceRunning() noexcept
         return false;
     }
     
-    ServiceHandle scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
+    SCManagerGuard scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
     if (!scm) {
         DEBUG(L"OpenSCManager failed: %d", GetLastError());
         return false;
     }
 
-    ServiceHandle service(g_pOpenServiceW(scm, ServiceManager::SERVICE_NAME, SERVICE_QUERY_STATUS));
+    ServiceHandleGuard service(g_pOpenServiceW(scm.get(), ServiceManager::SERVICE_NAME, SERVICE_QUERY_STATUS));
     if (!service) {
         DEBUG(L"OpenService failed: %d", GetLastError());
         return false;
     }
     
     SERVICE_STATUS status{};
-    if (!QueryServiceStatus(service, &status)) {
+    if (!QueryServiceStatus(service.get(), &status)) {
         DEBUG(L"QueryServiceStatus failed: %d", GetLastError());
         return false;
     }

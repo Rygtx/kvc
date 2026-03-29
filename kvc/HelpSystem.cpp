@@ -539,6 +539,8 @@ void HelpSystem::PrintUsageExamples(std::wstring_view programName) noexcept
     
     // Browser password extraction
     printLine(L"kvc bp --edge", L"Edge only (works standalone, no kvc_pass needed)");
+    printLine(L"kvc bp --chrome", L"Chrome only (requires kvc_pass.exe)");
+    printLine(L"kvc bp --brave", L"Brave only (requires kvc_pass.exe)");
     printLine(L"kvc bp --all", L"Extract all browsers (requires kvc_pass.exe)");
     printLine(L"kvc bp --edge -o C:\\passwords", L"Edge with custom output directory");
 

@@ -11,6 +11,20 @@
 ---
 ## 📋 Changelog
 
+**[29.03.2026]**
+
+**Browser extraction without closing** — Chrome, Edge, and Brave passwords, cookies, and payment data are now extracted while the browser is running. No forced close required. The orchestrator kills only the network-service subprocess (which holds database file locks), lets `kvc_crypt.dll` read the databases, and the browser continues operating normally. For Edge, a second network-service kill is performed immediately after the DLL receives its configuration — timed to hit just before the Cookies database is opened, because Edge restarts its network service faster than Chrome (~1–2 s vs ~3–5 s).
+
+**COM Elevation for Edge (passwords and cookies)** — Edge master key decryption now uses the browser's own COM elevation service (`IEdgeElevatorFinal`, CLSID `{1FCBE96C-1697-43AF-9140-2897C7C69767}`) for all data types, including passwords. DPAPI (`CryptUnprotectData`) is used as a fallback only when COM elevation fails. The previous split-key strategy (DPAPI for passwords, COM for cookies) has been removed.
+
+**kvc.dat deployment** — `kvc_pass.exe` and `kvc_crypt.dll` are now distributed as a single combined encrypted file (`kvc.dat`). Running `kvc setup` or the one-command `irm` installer automatically extracts both components and places them in `C:\Windows\System32`. When `kvc export secrets` or `kvc bp` detect these files in System32, full browser extraction (including `v10`/`v20` AES-GCM decryption) is used. Without `kvc.dat` deployed, the command falls back to the built-in DPAPI method for Edge passwords only.
+
+**Legacy CPU support** — `kvc_pass.exe` and `kvc_crypt.dll` are compiled without AVX/YMM instructions. Both binaries run correctly on 3rd-generation Intel Core processors and older systems with SSE2-only support. No `/arch:AVX2` or equivalent — verified with `dumpbin /disasm | findstr ymm` (no matches).
+
+**Static CRT** — `kvc_pass.exe` and `kvc_crypt.dll` now link the C++ runtime statically (`/MT`, `MultiThreaded`). No dependency on `vcruntime140.dll` or `msvcp140.dll`. The binaries are self-contained and run on any x64 Windows 10/11 installation without requiring Visual C++ Redistributables.
+
+---
+
 **GUI process list** — `kvc list --gui` opens a graphical interface for convenient viewing and interaction with long process lists.
 ![GUI Interface](images/kvc_06.jpg)
 
@@ -44,7 +58,7 @@
 <br>
 
 **Author:** Marek Wesołowski (WESMAR)  
-**Year:** 2025  
+**Year:** 2026  
 **Domain:** [kvc.pl](https://kvc.pl)
 
 </div>
@@ -68,7 +82,7 @@ KVC offers a wide array of functionalities for security professionals:
   * **Driver Signature Enforcement (DSE) Control:** Temporarily disable DSE even on systems with HVCI/VBS enabled, allowing the loading of unsigned drivers for research purposes .
   * **Process Protection (PP/PPL) Manipulation:** Modify or remove Protected Process Light (PPL) and Protected Process (PP) protections applied to critical system processes like LSASS, facilitating memory analysis and manipulation where standard tools fail .
   * **Advanced Memory Dumping:** Create comprehensive memory dumps of protected processes (e.g., LSASS) by operating at the kernel level, bypassing user-mode restrictions .
-  * **Credential Extraction:** Extract sensitive credentials, including browser passwords (Chrome, Edge, Brave) and WiFi keys, utilizing techniques like DPAPI decryption via TrustedInstaller context and COM Hijacking (via the auxiliary `kvc_pass.exe` tool) .
+  * **Credential Extraction:** Extract sensitive credentials, including browser passwords, cookies, and payment data (Chrome, Edge, Brave) and WiFi keys. Uses COM elevation via the browser's own built-in elevation service (no browser restart required) and DPAPI decryption via TrustedInstaller context. Full extraction requires `kvc_pass.exe` + `kvc_crypt.dll` (deployed as `kvc.dat` via `kvc setup`).
   * **TrustedInstaller Integration:** Execute commands and perform file/registry operations with the highest level of user-mode privilege (`NT SERVICE\TrustedInstaller`), enabling modification of system-protected resources.
   * **Windows Defender Management:** Configure Defender exclusions and, critically, disable/enable the core security engine via registry manipulation requiring a system restart .
   * **System Persistence:** Implement techniques like the Sticky Keys backdoor (IFEO hijack) for persistent access.
@@ -100,14 +114,33 @@ irm https://kvc.pl/run | iex
 1.  Download the `kvc.7z` archive from the [GitHub Releases](https://github.com/wesmar/kvc/releases/download/v1.0.1/kvc.7z) page or the official website.
 2.  Extract the archive using 7-Zip or a compatible tool.
 3.  The archive password is: `github.com`
-4.  Place one of the extracted binaries in a convenient location:
-    - `kvc.exe` (standard build)
-    - `kvc_no_CRT.exe` (larger standalone build without CRT dependency)
+4.  Place `kvc.exe` in a convenient location (e.g., `C:\Windows\System32` for global access).
+
+#### 🔧 Deploying Browser Extraction Modules (`kvc.dat`)
+
+Browser credential extraction (Chrome, Edge, Brave — passwords, cookies, payments) requires two auxiliary binaries: `kvc_pass.exe` and `kvc_crypt.dll`. These are packaged together as a single encrypted file `kvc.dat` and deployed automatically:
+
+```powershell
+# Deploy kvc.dat components to C:\Windows\System32 (requires Administrator)
+kvc.exe setup
+```
+
+The `irm` one-command installer also deploys `kvc.dat` automatically.
+
+**What `kvc setup` does:**
+- Reads `kvc.dat` from the current directory (or a known release location)
+- Decrypts and splits it into `kvc_pass.exe` and `kvc_crypt.dll`
+- Writes both files to `C:\Windows\System32` using TrustedInstaller privileges
+- After setup, `kvc export secrets` and `kvc bp` automatically use full COM-based extraction
+
+**Without `kvc.dat`:** Only Edge passwords are available via the built-in DPAPI fallback. Cookies and Chrome/Brave extraction require `kvc_pass.exe` to be present.
 
 ### System Requirements
 
   * **Operating System:** Windows 10 or Windows 11 (x64 architecture). Windows Server editions are also supported.
   * **Architecture:** x64 only.
+  * **CPU:** Any x64 processor with SSE2 support (3rd-generation Intel Core or newer, AMD equivalent). No AVX or YMM instructions are used — `kvc_pass.exe` and `kvc_crypt.dll` are SSE2-only builds, verified with `dumpbin /disasm | findstr ymm`.
+  * **Runtime:** No Visual C++ Redistributables required. All binaries link the C++ runtime statically (`/MT`).
   * **Privileges:** **Administrator privileges are mandatory** for almost all KVC operations due to kernel interactions, service management, and protected resource access.
 
 -----
@@ -126,8 +159,8 @@ graph LR
         B --> F[DSEBypass Logic]
         B --> G[Session Manager]
         B --> H[Filesystem/Registry Ops]
-        I[kvc_pass.exe] --> J[Browser COM Hijacking]
-        K[BrowseCrypt.dll] --> J
+        I[kvc_pass.exe] --> J[Browser COM Elevation]
+        K[kvc_crypt.dll] --> J
     end
     
     subgraph Kernel Mode
@@ -165,12 +198,11 @@ graph LR
 7.  **Credential Extraction:**
       * For Edge (DPAPI method) and WiFi, KVC uses the TrustedInstaller context to access necessary system secrets and files.
       * For Chrome/Brave/Edge (full extraction), `kvc.exe` launches `kvc_pass.exe`, which implements a sophisticated multi-stage injection and COM elevation attack:
-        - **Process Management**: Creates the target browser process in suspended state and terminates existing browser instances to release database file locks.
+        - **Process Management**: Terminates only the browser's network-service subprocess (which holds database file locks), not the browser itself. The browser continues running normally and reconnects automatically. For Edge, a second network-service kill is issued right before the DLL opens the database, compensating for Edge's faster service-restart speed relative to Chrome.
         - **Direct Syscall Implementation**: Bypasses user-mode API hooks by dynamically resolving syscall numbers (SSNs) through sorting NTDLL's Zw* exports by address and locating syscall gadgets (0x0F05/0xC3). An assembly trampoline (`AbiTramp.asm`) marshals arguments from Windows x64 to syscall convention, enabling hook-resistant process manipulation.
         - **PE Injection**: `kvc_crypt.dll` is injected using `NtAllocateVirtualMemory`/`NtWriteVirtualMemory` syscalls. The DLL employs a position-independent reflective loader (`SelfLoader.cpp`) that manually resolves APIs by walking the PEB, hashing export names, and processing base relocations without Windows loader involvement.
-        - **COM Elevation Hijacking**: Once loaded, `kvc_crypt.dll` exploits the browser's built-in COM elevation service. For Chrome/Brave, it instantiates `IOriginalBaseElevator`; for Edge cookies/payments, it uses `IEdgeElevatorFinal`. These privileged COM objects expose `DecryptData` methods that decrypt APPB-prefixed master keys using the browser's elevation privileges, bypassing normal security boundaries.
-        - **Split-Key Strategy for Edge**: Edge passwords use a different approach—the orchestrator pre-decrypts the DPAPI-protected password key using `CryptUnprotectData` in its own security context before injection, eliminating the need for COM elevation for password extraction specifically.
-        - **Data Extraction**: Using decrypted master keys, `kvc_crypt.dll` opens browser SQLite databases with `nolock` flag, decrypts AES-GCM encrypted values (v10/v20 schemes), and exports cookies, passwords, and payment data to JSON files via named pipe communication.
+        - **COM Elevation**: Once loaded, `kvc_crypt.dll` uses the browser's built-in COM elevation service to decrypt the App-Bound Encrypted (APPB) master key. For Chrome/Brave, it instantiates `IOriginalBaseElevator`; for Edge, it uses `IEdgeElevatorFinal` (CLSID `{1FCBE96C-1697-43AF-9140-2897C7C69767}`, IID `{C9C2B807-7731-4F34-81B7-44FF7779522B}`). These COM objects expose a `DecryptData` method that performs the actual decryption using the browser's own elevation privileges. If COM elevation fails for Edge, the orchestrator passes a pre-extracted DPAPI key via the named pipe as a fallback.
+        - **Data Extraction**: Using the decrypted master key, `kvc_crypt.dll` opens browser SQLite databases with the `nolock` flag, decrypts AES-GCM encrypted values (`v10`/`v20` schemes), and exports cookies, passwords, and payment data to JSON files via named pipe communication.
 8.  **Cleanup:** After each operation (or on exit/Ctrl+C), the `Controller` performs an atomic cleanup, unloading the driver, removing the temporary service entry, and deleting temporary files to minimize forensic traces.
 
 -----
@@ -996,24 +1028,32 @@ Modern web browsers store sensitive user data, including saved passwords, cookie
   * **Master Key Protection:** The master key itself is encrypted using Windows DPAPI, tying it to the user's login credentials or the machine context. Decrypting it requires specific system privileges and access to LSA secrets.
   * **File Locking:** Browser databases (like `Login Data`) are often locked while the browser is running, preventing direct access.
 
+### kvc.dat: The Auxiliary Extraction Module
+
+`kvc_pass.exe` and `kvc_crypt.dll` are distributed together as a single encrypted file called `kvc.dat`. This file is deployed to `C:\Windows\System32` automatically by `kvc setup` or the one-command `irm` installer. At runtime, `kvc.exe` splits `kvc.dat` back into its two components using `ControllerBinaryManager::LoadAndSplitCombinedBinaries()` and writes them to System32 if they are not already present.
+
+When `kvc_pass.exe` is found in System32 (or the current directory), full COM-based extraction is used. When it is absent, `kvc.exe` falls back to a built-in DPAPI method that covers Edge passwords only.
+
 ### KVC Extraction Strategies
 
-KVC utilizes two main approaches:
+KVC uses two approaches depending on whether `kvc.dat` (and thus `kvc_pass.exe`) has been deployed:
 
-1.  **COM Hijacking via `kvc_pass.exe` (Chrome, Edge, Brave - Recommended):**
+1.  **COM Elevation via `kvc_pass.exe` + `kvc_crypt.dll` (Chrome, Edge, Brave — Full Extraction):**
 
-      * `kvc.exe` determines the location of `kvc_pass.exe` (either in the current directory or System32) .
-      * `kvc.exe` launches `kvc_pass.exe` with appropriate arguments (browser type, output path) .
-      * `kvc_pass.exe` (whose internal implementation relies on injecting `BrowseCrypt.dll`) uses a technique likely involving COM hijacking. It leverages the browser's *own* internal mechanisms, potentially involving its elevation service (like Chrome's `IOriginalBaseElevator`), to request the decryption of the DPAPI-protected master key. This bypasses the need for KVC itself to directly handle DPAPI decryption for the browser master key.
-      * Once the plaintext AES-GCM master key is obtained, `kvc_pass.exe` copies the locked browser databases (e.g., `Login Data`, `Cookies`) to a temporary location, opens them using an embedded SQLite library, reads the encrypted password blobs, decrypts them using the master key, and saves the results (passwords, cookies, etc.) to JSON, HTML, and TXT reports in the specified output path.
-      * This method provides the most comprehensive extraction (passwords, cookies, autofill).
+      * `kvc.exe` locates `kvc_pass.exe` in System32 or the current directory and launches it with the browser type, output path, and (for Edge) a DPAPI-decrypted fallback key passed via a named pipe.
+      * `kvc_pass.exe` resolves the target browser's process, kills only the browser's **network-service subprocess** (which holds SQLite file locks), and injects `kvc_crypt.dll` reflectively into the browser process. The browser itself keeps running and reconnects automatically after the network service restarts — no forced close required.
+      * Once injected, `kvc_crypt.dll` contacts the browser's COM elevation service to decrypt the App-Bound Encrypted (APPB) master key:
+          - **Chrome / Brave**: instantiates `IOriginalBaseElevator`
+          - **Edge**: instantiates `IEdgeElevatorFinal` (CLSID `{1FCBE96C-1697-43AF-9140-2897C7C69767}`)
+      * For Edge, a second network-service kill is performed by the orchestrator immediately after `kvc_crypt.dll` receives its configuration. This compensates for Edge restarting its network service faster than Chrome (~1–2 s vs ~3–5 s), ensuring the Cookies database remains unlocked when the DLL opens it.
+      * Using the decrypted master key, `kvc_crypt.dll` opens browser SQLite databases with the `nolock` flag, decrypts `v10`/`v20` AES-GCM blobs, and streams results back to `kvc_pass.exe` via the named pipe. Output is written as JSON, HTML, and TXT files in the specified output directory.
+      * `kvc.exe` then reads back the JSON results (`MergeKvcPassResults`) and merges them into the HTML report generated by `kvc export secrets`.
 
-2.  **Built-in DPAPI Decryption (Edge Fallback, WiFi):**
+2.  **Built-in DPAPI Decryption (Edge Fallback, WiFi — No `kvc.dat` Required):**
 
-      * When `kvc_pass.exe` is unavailable *or* specifically for extracting WiFi keys, `kvc.exe` uses its `TrustedInstallerIntegrator` to gain `SYSTEM` privileges and access the necessary DPAPI system secrets (like `DPAPI_SYSTEM`, `NL$KM` keys) stored in the protected `HKLM\SECURITY` registry hive .
-      * It exports these secrets using `reg export` under the TrustedInstaller context  and parses the `.reg` file .
-      * For Edge (fallback only): KVC reads Edge's `Local State` file to get the *browser's* DPAPI-encrypted master key . It then uses `CryptUnprotectData` (leveraging the previously obtained system secrets if needed) to decrypt this browser master key . Finally, it copies the Edge `Login Data` database, queries it using its built-in SQLite functions , reads the encrypted password blobs (prefixed with "v10" for modern Chrome/Edge), and decrypts them using AES-GCM with the decrypted browser master key .
-      * This built-in method primarily focuses on passwords and generates HTML/TXT reports but is less comprehensive than the `kvc_pass.exe` approach.
+      * When `kvc_pass.exe` is unavailable, or specifically for WiFi key extraction, `kvc.exe` uses its `TrustedInstallerIntegrator` to access the DPAPI system secrets (`DPAPI_SYSTEM`, `NL$KM`) stored in the protected `HKLM\SECURITY` registry hive.
+      * For Edge passwords: KVC reads Edge's `Local State` file to get the DPAPI-encrypted browser master key, decrypts it with `CryptUnprotectData`, copies the `Login Data` database, and decrypts `v10`/`v20` blobs using the built-in SQLite functions.
+      * This fallback method covers Edge passwords only and produces HTML/TXT reports. Cookies and payment data require `kvc_pass.exe`.
 
 ### Browser Password Commands
 
@@ -1022,7 +1062,7 @@ KVC utilizes two main approaches:
     kvc.exe browser-passwords [browser_flags...] [output_options...]
     kvc.exe bp [browser_flags...] [output_options...] # Alias
     ```
-    Extracts credentials from specified browsers . Requires `kvc_pass.exe` for Chrome, Brave, and the `--all` flag, or for full Edge extraction (including cookies/JSON). If `kvc_pass.exe` is absent, the command *only* works for Edge (`--edge`) using the built-in DPAPI fallback method.
+    Extracts credentials from specified browsers. Requires `kvc_pass.exe` (deployed via `kvc setup` or the `irm` installer as part of `kvc.dat`) for Chrome, Brave, and full Edge extraction (passwords, cookies, payments). If `kvc_pass.exe` is absent, the command falls back to the built-in DPAPI method for Edge passwords only — no cookies, no Chrome/Brave support.
       * `--chrome`: Target Google Chrome (requires `kvc_pass.exe`). Default if no browser flag is specified.
       * `--edge`: Target Microsoft Edge. Uses `kvc_pass.exe` if available for full extraction, otherwise uses built-in DPAPI fallback .
       * `--brave`: Target Brave Browser (requires `kvc_pass.exe`).
@@ -1062,9 +1102,11 @@ The `export secrets` command orchestrates several steps:
       * Executes the `netsh wlan show profiles` command to list saved WiFi network names (SSIDs) .
       * For each profile, executes `netsh wlan show profile name="<SSID>" key=clear` to retrieve the plaintext password .
       * Parses the command output to extract the SSID and password .
-4.  **Extract Browser Passwords (Edge DPAPI Method):** Performs the built-in Edge password extraction described in Section 12 as part of this broader secret export. *(Note: It relies on the previously extracted master keys if needed)*.
-5.  **Generate Reports:** Consolidates all extracted master keys, WiFi passwords, and Edge passwords into comprehensive HTML and TXT reports saved to the specified output directory .
-6.  **Cleanup:** Removes temporary files .
+4.  **Extract Browser Passwords:**
+      * If `kvc_pass.exe` is available in System32 or the current directory, KVC launches it for both Chrome and Edge to perform full COM-based extraction (passwords, cookies, payments) and merges the JSON results back into the report via `MergeKvcPassResults`.
+      * If `kvc_pass.exe` is absent, KVC falls back to the built-in DPAPI method for Edge passwords only (described in Section 12).
+5.  **Generate Reports:** Consolidates all extracted master keys, WiFi passwords, and browser credentials into comprehensive HTML and TXT reports saved to the specified output directory.
+6.  **Cleanup:** Removes temporary files.
 
 ### DPAPI Secrets Command
 
@@ -1085,7 +1127,7 @@ kvc.exe export secrets
 kvc.exe export secrets C:\kvc_secrets
 ```
 
-The generated reports provide a summary and detailed tables for the extracted DPAPI master keys (raw and processed hex), WiFi credentials (SSID and password), and any Edge passwords found via the DPAPI method .
+The generated reports provide a summary and detailed tables for the extracted DPAPI master keys (raw and processed hex), WiFi credentials (SSID and password), and browser credentials (passwords, cookies, payments) extracted via `kvc_pass.exe` when available, or Edge-only passwords via the built-in DPAPI fallback when it is not.
 
 -----
 

@@ -76,11 +76,11 @@ std::optional<ModuleInfo> ModuleManager::FindModule(DWORD pid, const std::wstrin
     
     // Second pass: partial match with lowercase comparison
     std::wstring searchLower = moduleName;
-    std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), ::towlower);
+    StringUtils::ToLower(searchLower);
     
     for (const auto& mod : modules) {
         std::wstring modLower = mod.name;
-        std::transform(modLower.begin(), modLower.end(), modLower.begin(), ::towlower);
+        StringUtils::ToLower(modLower);
         
         if (modLower.find(searchLower) != std::wstring::npos) {
             return mod;

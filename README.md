@@ -11,6 +11,25 @@
 ---
 ## 📋 Changelog
 
+**[30.03.2026]**
+
+<details>
+<summary><strong>💾 Windows 10 DSE Support via SymbolEngine</strong> (click to expand)</summary>
+
+```
+C:\>kvc driver load kvckbd
+[*] Loading external driver: kvckbd
+[*] CiPolicy section not found in ci.dll. Falling back to SymbolEngine (Windows 10)...
+[+] [SymbolEngine] Symbol 'g_CiOptions' resolved to RVA: 0x391B0
+[+] Resolved g_CiOptions via SymbolEngine at: 0xFFFFF807192391B0 (RVA: 0x391B0)
+```
+
+**Universal DSE bypass** — `kvc dse off` now works on both Windows 10 and Windows 11. The Standard method uses a dual-path approach: first attempts fast PE-section parsing to locate the `CiPolicy` section (Windows 11), and if not found, automatically falls back to SymbolEngine-based resolution of `g_CiOptions` from PDB symbols (Windows 10). This ensures compatibility across all supported Windows versions without requiring the `--safe` flag. Symbol resolution is performed locally using Microsoft Symbol Server — PDB files are downloaded automatically on first use and cached in `C:\ProgramData\dbg\sym\`.
+
+</details>
+
+---
+
 **[29.03.2026]**
 
 **Browser extraction without closing** — Chrome, Edge, and Brave passwords, cookies, and payment data are now extracted while the browser is running. No forced close required. The orchestrator kills only the network-service subprocess (which holds database file locks), lets `kvc_crypt.dll` read the databases, and the browser continues operating normally. For Edge, a second network-service kill is performed immediately after the DLL receives its configuration — timed to hit just before the Cookies database is opened, because Edge restarts its network service faster than Chrome (~1–2 s vs ~3–5 s).
@@ -252,8 +271,9 @@ DSE is a Windows security feature that prevents loading drivers not signed by Mi
 
 KVC supports DSE control in **all scenarios**:
 
-  * ✅ Standard Systems (`g_CiOptions = 0x6`): Direct memory patch via the driver.
-  * ✅ HVCI/VBS Enabled Systems (`g_CiOptions = 0x0001C006` or similar): Requires a sophisticated bypass involving a reboot .
+  * ✅ **Standard Systems** (`g_CiOptions = 0x6`): Direct memory patch via the driver.
+  * ✅ **Windows 10 (all builds)**: Automatic SymbolEngine fallback — `g_CiOptions` resolved from PDB symbols when `CiPolicy` section is not present in `ci.dll`.
+  * ✅ **HVCI/VBS Enabled Systems** (`g_CiOptions = 0x0001C006` or similar): Requires a sophisticated bypass involving a reboot.
 
 ### How KVC Bypasses DSE
 

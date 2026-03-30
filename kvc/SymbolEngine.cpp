@@ -48,6 +48,93 @@ std::optional<std::pair<DWORD64, DWORD64>> SymbolEngine::GetKernelSymbolOffsets(
     return GetSymbolOffsets(kernelInfo->second);
 }
 
+std::optional<DWORD64> SymbolEngine::GetSymbolOffset(const std::wstring& modulePath, const std::wstring& symbolName) noexcept {
+    DEBUG(L"[SymbolEngine] Resolving symbol '%s' for module: %s", symbolName.c_str(), modulePath.c_str());
+    
+    if (!Initialize()) {
+        ERROR(L"[SymbolEngine] Failed to initialize");
+        return std::nullopt;
+    }
+
+    // Extract PDB information from module binary
+    auto pdbInfo = GetPdbInfoFromPe(modulePath);
+    if (!pdbInfo) {
+        ERROR(L"[SymbolEngine] Failed to extract PDB info from module: %s", modulePath.c_str());
+        return std::nullopt;
+    }
+    
+    auto [pdbName, guid] = *pdbInfo;
+    DEBUG(L"[SymbolEngine] PDB: %s, GUID: %s", pdbName.c_str(), guid.c_str());
+    
+    // Build local PDB path
+    std::wstring localPdbPath = GetLocalPdbPath(pdbName, guid);
+    if (localPdbPath.empty()) {
+        ERROR(L"[SymbolEngine] Failed to build local PDB path");
+        return std::nullopt;
+    }
+    
+    // Check if PDB exists locally, otherwise download
+    if (!PathFileExistsW(localPdbPath.c_str())) {
+        INFO(L"[SymbolEngine] Local PDB not found, downloading...");
+        if (!DownloadPdbToDisk(pdbName, guid, localPdbPath)) {
+            ERROR(L"[SymbolEngine] Failed to download PDB");
+            return std::nullopt;
+        }
+    }
+    
+    return CalculateSymbolOffsetFromDisk(localPdbPath, pdbName, symbolName);
+}
+
+std::optional<DWORD64> SymbolEngine::CalculateSymbolOffsetFromDisk(
+    const std::wstring& pdbPath,
+    const std::wstring& pdbName,
+    const std::wstring& symbolName) noexcept
+{
+    DEBUG(L"[SymbolEngine] Resolving symbol '%s' from PDB: %s", symbolName.c_str(), pdbPath.c_str());
+
+    std::wstring pdbDir = pdbPath.substr(0, pdbPath.find_last_of(L"\\/"));
+    
+    if (m_initialized) {
+        SymCleanup(GetCurrentProcess());
+        m_initialized = false;
+    }
+
+    std::wstring symbolPath = L"SRV*" + pdbDir;
+    DWORD options = SymGetOptions();
+    SymSetOptions(options | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_CASE_INSENSITIVE);
+
+    if (!SymInitializeW(GetCurrentProcess(), symbolPath.c_str(), FALSE)) {
+        ERROR(L"[SymbolEngine] SymInitializeW failed: %d", GetLastError());
+        return std::nullopt;
+    }
+    m_initialized = true;
+
+    DWORD64 baseAddr = 0x140000000;
+    DWORD64 loadedModule = SymLoadModuleExW(GetCurrentProcess(), nullptr,
+        pdbPath.c_str(), nullptr, baseAddr, 0, nullptr, 0);
+
+    if (loadedModule == 0) {
+        ERROR(L"[SymbolEngine] SymLoadModuleExW failed: %d", GetLastError());
+        return std::nullopt;
+    }
+
+    std::vector<BYTE> symBuffer(sizeof(SYMBOL_INFOW) + (MAX_SYM_NAME * sizeof(wchar_t)));
+    PSYMBOL_INFOW pSymbol = reinterpret_cast<PSYMBOL_INFOW>(symBuffer.data());
+    pSymbol->SizeOfStruct = sizeof(SYMBOL_INFOW);
+    pSymbol->MaxNameLen = MAX_SYM_NAME;
+
+    DWORD64 offset = 0;
+    if (SymFromNameW(GetCurrentProcess(), symbolName.c_str(), pSymbol)) {
+        offset = pSymbol->Address - baseAddr;
+        SUCCESS(L"[SymbolEngine] Symbol '%s' resolved to RVA: 0x%llX", symbolName.c_str(), offset);
+    } else {
+        ERROR(L"[SymbolEngine] Symbol '%s' not found: %d", symbolName.c_str(), GetLastError());
+    }
+
+    SymUnloadModule64(GetCurrentProcess(), loadedModule);
+    return (offset != 0) ? std::optional<DWORD64>(offset) : std::nullopt;
+}
+
 std::optional<std::pair<DWORD64, DWORD64>> SymbolEngine::GetSymbolOffsets(const std::wstring& kernelPath) noexcept {
     DEBUG(L"[SymbolEngine] Processing kernel: %s", kernelPath.c_str());
     
@@ -176,18 +263,20 @@ std::optional<std::pair<std::wstring, std::wstring>> SymbolEngine::GetPdbInfoFro
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     
     if (hFile == INVALID_HANDLE_VALUE) {
-        DEBUG(L"[SymbolEngine] Failed to open PE file: %s", pePath.c_str());
+        ERROR(L"[SymbolEngine] Failed to open PE file: %s (error: %d)", pePath.c_str(), GetLastError());
         return std::nullopt;
     }
     
     HANDLE hMapping = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
     if (!hMapping) {
+        ERROR(L"[SymbolEngine] Failed to create file mapping for PE (error: %d)", GetLastError());
         CloseHandle(hFile);
         return std::nullopt;
     }
     
     LPVOID pBase = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
     if (!pBase) {
+        ERROR(L"[SymbolEngine] Failed to map view of file (error: %d)", GetLastError());
         CloseHandle(hMapping);
         CloseHandle(hFile);
         return std::nullopt;
@@ -205,49 +294,62 @@ std::optional<std::pair<std::wstring, std::wstring>> SymbolEngine::GetPdbInfoFro
             DWORD debugDirSize = pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
             
             if (debugDirRva && debugDirSize) {
+                // Convert RVA to file offset properly since we mapped the file flat, not as SEC_IMAGE
+                PIMAGE_SECTION_HEADER pSection = IMAGE_FIRST_SECTION(pNt);
                 PIMAGE_DEBUG_DIRECTORY pDebugDir = reinterpret_cast<PIMAGE_DEBUG_DIRECTORY>(
-                    reinterpret_cast<BYTE*>(pBase) + debugDirRva);
+                    ImageRvaToVa(pNt, pBase, debugDirRva, &pSection));
                 
-                for (DWORD i = 0; i < debugDirSize / sizeof(IMAGE_DEBUG_DIRECTORY); i++) {
-                    if (pDebugDir[i].Type == IMAGE_DEBUG_TYPE_CODEVIEW) {
-                        struct CV_INFO_PDB70 {
-                            DWORD CvSignature;
-                            GUID Signature;
-                            DWORD Age;
-                            char PdbFileName[1];
-                        };
-                        
-                        CV_INFO_PDB70* pCv = reinterpret_cast<CV_INFO_PDB70*>(
-                            reinterpret_cast<BYTE*>(pBase) + pDebugDir[i].PointerToRawData);
-                        
-                        if (pCv->CvSignature == 0x53445352) {
-                            wchar_t guidBuf[64];
-                            swprintf_s(guidBuf, L"%08X%04X%04X%02X%02X%02X%02X%02X%02X%02X%02X%X",
-                                pCv->Signature.Data1, pCv->Signature.Data2, pCv->Signature.Data3,
-                                pCv->Signature.Data4[0], pCv->Signature.Data4[1],
-                                pCv->Signature.Data4[2], pCv->Signature.Data4[3],
-                                pCv->Signature.Data4[4], pCv->Signature.Data4[5],
-                                pCv->Signature.Data4[6], pCv->Signature.Data4[7],
-                                pCv->Age);
-                            guidStr = guidBuf;
+                if (pDebugDir) {
+                    for (DWORD i = 0; i < debugDirSize / sizeof(IMAGE_DEBUG_DIRECTORY); i++) {
+                        if (pDebugDir[i].Type == IMAGE_DEBUG_TYPE_CODEVIEW) {
+                            struct CV_INFO_PDB70 {
+                                DWORD CvSignature;
+                                GUID Signature;
+                                DWORD Age;
+                                char PdbFileName[1];
+                            };
                             
-                            int len = MultiByteToWideChar(CP_UTF8, 0, pCv->PdbFileName, -1, nullptr, 0);
-                            if (len > 0) {
-                                std::vector<wchar_t> wbuf(len);
-                                MultiByteToWideChar(CP_UTF8, 0, pCv->PdbFileName, -1, wbuf.data(), len);
+                            // PointerToRawData is already a raw file offset
+                            CV_INFO_PDB70* pCv = reinterpret_cast<CV_INFO_PDB70*>(
+                                reinterpret_cast<BYTE*>(pBase) + pDebugDir[i].PointerToRawData);
+                            
+                            if (pCv->CvSignature == 0x53445352) {
+                                wchar_t guidBuf[64];
+                                swprintf_s(guidBuf, L"%08X%04X%04X%02X%02X%02X%02X%02X%02X%02X%02X%X",
+                                    pCv->Signature.Data1, pCv->Signature.Data2, pCv->Signature.Data3,
+                                    pCv->Signature.Data4[0], pCv->Signature.Data4[1],
+                                    pCv->Signature.Data4[2], pCv->Signature.Data4[3],
+                                    pCv->Signature.Data4[4], pCv->Signature.Data4[5],
+                                    pCv->Signature.Data4[6], pCv->Signature.Data4[7],
+                                    pCv->Age);
+                                guidStr = guidBuf;
                                 
-                                std::wstring fullPath = wbuf.data();
-                                size_t lastSlash = fullPath.find_last_of(L"\\/");
-                                pdbName = (lastSlash != std::wstring::npos) 
-                                    ? fullPath.substr(lastSlash + 1) 
-                                    : fullPath;
+                                int len = MultiByteToWideChar(CP_UTF8, 0, pCv->PdbFileName, -1, nullptr, 0);
+                                if (len > 0) {
+                                    std::vector<wchar_t> wbuf(len);
+                                    MultiByteToWideChar(CP_UTF8, 0, pCv->PdbFileName, -1, wbuf.data(), len);
+                                    
+                                    std::wstring fullPath = wbuf.data();
+                                    size_t lastSlash = fullPath.find_last_of(L"\\/");
+                                    pdbName = (lastSlash != std::wstring::npos) 
+                                        ? fullPath.substr(lastSlash + 1) 
+                                        : fullPath;
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
+                } else {
+                    ERROR(L"[SymbolEngine] ImageRvaToVa failed to resolve Debug Directory RVA");
                 }
+            } else {
+                ERROR(L"[SymbolEngine] No debug directory found in PE headers");
             }
+        } else {
+            ERROR(L"[SymbolEngine] Invalid NT signature");
         }
+    } else {
+        ERROR(L"[SymbolEngine] Invalid DOS signature");
     }
     
     UnmapViewOfFile(pBase);
@@ -255,7 +357,7 @@ std::optional<std::pair<std::wstring, std::wstring>> SymbolEngine::GetPdbInfoFro
     CloseHandle(hFile);
     
     if (pdbName.empty() || guidStr.empty()) {
-        DEBUG(L"[SymbolEngine] Failed to extract PDB info");
+        ERROR(L"[SymbolEngine] Failed to extract PDB info (Name or GUID is empty)");
         return std::nullopt;
     }
     

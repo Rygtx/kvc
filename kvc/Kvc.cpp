@@ -771,11 +771,11 @@ int wmain(int argc, wchar_t* argv[])
             if (argc < 3) {
                 INFO(L"Usage: kvc undervolter <deploy|remove|status>");
                 INFO(L"");
-                INFO(L"  deploy  — extract UnderVolter.dat and write Loader.efi +");
+                INFO(L"  deploy  - extract UnderVolter.dat and write Loader.efi +");
                 INFO(L"            UnderVolter.efi + UnderVolter.ini to the EFI partition.");
                 INFO(L"            Optionally replaces \\EFI\\BOOT\\BOOTX64.EFI (backed up).");
-                INFO(L"  remove  — restore backed-up BOOTX64.EFI and remove EFI\\UnderVolter\\.");
-                INFO(L"  status  — check whether UnderVolter is deployed on the EFI partition.");
+                INFO(L"  remove  - restore backed-up BOOTX64.EFI and remove EFI\\UnderVolter\\.");
+                INFO(L"  status  - check whether UnderVolter is deployed on the EFI partition.");
                 INFO(L"");
                 INFO(L"  Requires UnderVolter.dat in the current directory or System32.");
                 INFO(L"  Build UnderVolter.dat with KvcXor.exe option 6.");

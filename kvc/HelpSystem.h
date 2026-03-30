@@ -1,19 +1,23 @@
 #pragma once
 
 #include <windows.h>
-#include <string_view>
+#include <string>
 
 // Console layout constants for consistent formatting across help system
 namespace HelpLayout {
     inline constexpr int WIDTH = 80;
     inline constexpr int COMMAND_WIDTH = 50;
     inline constexpr int EXAMPLE_CMD_WIDTH = 60;
-    
-    // Border characters as string views for zero-allocation usage
-    inline constexpr std::wstring_view BORDER_DOUBLE = 
-        L"================================================================================";
-    inline constexpr std::wstring_view BORDER_SINGLE = 
-        L"------------------------------------------------------------------------------";
+
+    // Wide border (wcout / INFO / CRITICAL)
+    inline std::wstring MakeBorder(wchar_t ch = L'=', int count = WIDTH) {
+        return std::wstring(count, ch);
+    }
+
+    // Narrow border (printf)
+    inline std::string MakeBorderA(char ch = '=', int count = WIDTH) {
+        return std::string(count, ch);
+    }
 }
 
 class HelpSystem

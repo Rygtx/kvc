@@ -1,5 +1,6 @@
 #include "ReportExporter.h"
 #include "Controller.h"
+#include "HelpSystem.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -83,20 +84,20 @@ namespace HTMLStyles {
 
 // Table column width definitions for HTML generation
 namespace TableWidths {
-    // Master keys table
-    static constexpr std::array MASTER_KEYS = { "15%", "40%", "40%", "5%" };
-    static constexpr std::array<std::string_view, 4> MASTER_KEYS_HEADERS = { 
-        "Key Type", "Raw Data (Hex)", "Processed Data (Hex)", "Status" 
+    // Master keys table — Status bumped to 10% (was 5%, clipped the header)
+    static constexpr std::array MASTER_KEYS = { "15%", "37%", "38%", "10%" };
+    static constexpr std::array<std::string_view, 4> MASTER_KEYS_HEADERS = {
+        "Key Type", "Raw Data (Hex)", "Processed Data (Hex)", "Status"
     };
-    
-    // Browser passwords table
-    static constexpr std::array PASSWORDS = { "15%", "15%", "25%", "15%", "20%", "10%" };
-    static constexpr std::array<std::string_view, 6> PASSWORDS_HEADERS = {
-        "Browser", "Profile", "URL", "Username", "Password", "Status"
+
+    // Browser passwords table — Status bumped to 12% (was 10%), URL trimmed
+    static constexpr std::array PASSWORDS = { "6%", "44%", "22%", "18%", "10%" };
+    static constexpr std::array<std::string_view, 5> PASSWORDS_HEADERS = {
+        "Profile", "URL", "Username", "Password", "Status"
     };
-    
-    // WiFi credentials table
-    static constexpr std::array WIFI = { "30%", "40%", "15%", "15%" };
+
+    // WiFi credentials table — Status bumped to 17% (was 15%), Network trimmed
+    static constexpr std::array WIFI = { "28%", "40%", "15%", "17%" };
     static constexpr std::array<std::string_view, 4> WIFI_HEADERS = {
         "Network Name", "Password", "Type", "Status"
     };
@@ -206,7 +207,7 @@ std::string ReportExporter::GenerateHTMLContent(const ReportData& data) noexcept
     html << BuildMasterKeysTable(data);
     html << BuildPasswordsTable(data);
     html << BuildWiFiTable(data);
-    html << "</div>\n</body>\n</html>";
+    html << "</div></body></html>";
     
     return html.str();
 }
@@ -214,15 +215,16 @@ std::string ReportExporter::GenerateHTMLContent(const ReportData& data) noexcept
 std::string ReportExporter::BuildHTMLHeader(const ReportData& data) noexcept
 {
     std::ostringstream header;
-    
-    header << "<!DOCTYPE html>\n<html>\n<head>\n";
-    header << "    <meta charset=\"utf-8\">\n";
-    header << "    <title>kvc DPAPI Extraction Results - Kernel Vulnerability Capabilities Framework by WESMAR</title>\n";
-    header << "    <style>" << HTMLStyles::BuildCSS() << "</style>\n";
-    header << "</head>\n<body>\n";
-    header << "    <div class=\"container\">\n";
-    header << "        <h1>&#128274; kvc DPAPI Extraction Results - Kernel Vulnerability Capabilities Framework by WESMAR</h1>\n";
-    
+
+    header << "<!DOCTYPE html><html><head>"
+           << "<meta charset=\"utf-8\">"
+           << "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+           << "<title>kvc DPAPI Extraction Results</title>"
+           << "<style>" << HTMLStyles::BuildCSS() << "</style>"
+           << "</head><body>"
+           << "<div class=\"container\">"
+           << "<h1>&#128274; kvc DPAPI Extraction Results</h1>";
+
     return header.str();
 }
 
@@ -301,7 +303,7 @@ std::string ReportExporter::BuildPasswordsTable(const ReportData& data) noexcept
 {
     std::ostringstream table;
     
-    table << "\n        <div class=\"section-title\">Browser Passwords</div>\n";
+    table << "\n        <div class=\"section-title\">Browser Passwords - Edge</div>\n";
     table << "        <table>\n";
     table << "            <thead>\n";
     table << "                <tr>\n";
@@ -327,7 +329,6 @@ std::string ReportExporter::BuildPasswordsTable(const ReportData& data) noexcept
                                (passUtf8.substr(0,3) == "v10" || passUtf8.substr(0,3) == "v20");
 
             table << "                <tr class=\"" << cssClass << "\">\n";
-            table << "                    <td>" << StringUtils::WideToUTF8(result.type) << "</td>\n";
             table << "                    <td>" << StringUtils::WideToUTF8(result.profile) << "</td>\n";
             table << "                    <td>" << StringUtils::WideToUTF8(result.url) << "</td>\n";
             table << "                    <td>" << StringUtils::WideToUTF8(result.username) << "</td>\n";
@@ -400,7 +401,7 @@ std::wstring ReportExporter::BuildTXTHeader(const ReportData& data) noexcept
     header << L"Registry Master Keys: " << data.stats.masterKeyCount << L"\n";
     header << L"Total Passwords: " << data.stats.totalPasswords << L"\n";
     header << L"Tool: kvc v1.0.1 - Kernel Vulnerability Capabilities Framework by WESMAR\n";
-    header << L"=================================\n\n";
+    header << HelpLayout::MakeBorder(L'=', 33) << L"\n\n";
     
     return header.str();
 }
@@ -414,7 +415,7 @@ std::wstring ReportExporter::BuildTXTMasterKeys(const ReportData& data) noexcept
         section << L"Key: " << masterKey.keyName << L"\n";
         section << L"Size: " << masterKey.encryptedData.size() << L" bytes\n";
         section << L"Status: " << (masterKey.isDecrypted ? L"DECRYPTED" : L"EXTRACTED") << L"\n";
-        section << L"---------------------------------\n";
+        section << HelpLayout::MakeBorder(L'-', 33) << L"\n";
     }
     section << L"\n";
     
@@ -445,7 +446,7 @@ std::wstring ReportExporter::BuildTXTPasswords(const ReportData& data) noexcept
                 section << L"Password: " << result.password << L"\n";
                 section << L"Status: " << result.status << L"\n";
             }
-            section << L"---------------------------------\n";
+            section << HelpLayout::MakeBorder(L'-', 33) << L"\n";
         }
     }
     section << L"\n";
@@ -463,7 +464,7 @@ std::wstring ReportExporter::BuildTXTWiFi(const ReportData& data) noexcept
             section << L"Network: " << result.profile << L"\n";
             section << L"Password: " << result.password << L"\n";
             section << L"Status: " << result.status << L"\n";
-            section << L"---------------------------------\n";
+            section << HelpLayout::MakeBorder(L'-', 33) << L"\n";
         }
     }
     section << L"\n";

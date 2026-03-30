@@ -88,7 +88,7 @@ void HelpSystem::PrintHeader() noexcept
     WORD originalColor = csbi.wAttributes;
 
     SetConsoleTextAttribute(hConsole, Colors::BLUE_BRIGHT);
-    std::wcout << L"\n" << HelpLayout::BORDER_DOUBLE << L"\n";
+    std::wcout << L"\n" << HelpLayout::MakeBorder() << L"\n";
 
     PrintCentered(L"Marek Wesolowski - WESMAR - 2025", hConsole, Colors::WHITE_BRIGHT);
     PrintCentered(L"kvc.exe v1.0.1 https://kvc.pl", hConsole, Colors::WHITE_BRIGHT);
@@ -98,7 +98,7 @@ void HelpSystem::PrintHeader() noexcept
     PrintCentered(L"Features Process Protection, DPAPI Extraction, Defender Bypass & More", hConsole, Colors::WHITE_BRIGHT);
 
     SetConsoleTextAttribute(hConsole, Colors::BLUE_BRIGHT);
-    std::wcout << HelpLayout::BORDER_DOUBLE << L"\n\n";
+    std::wcout << HelpLayout::MakeBorder() << L"\n\n";
 
     SetConsoleTextAttribute(hConsole, originalColor);
 }

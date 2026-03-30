@@ -5,6 +5,7 @@
 #include "Controller.h"
 #include "common.h"
 #include "Utils.h"
+#include "HelpSystem.h"
 #include "resource.h"
 #include <filesystem>
 
@@ -210,9 +211,9 @@ bool Controller::InstallDriver() noexcept {
     // Check for zombie service state
     if (IsServiceZombie()) {
         CRITICAL(L"");
-        CRITICAL(L"===============================================================");
+        CRITICAL(HelpLayout::MakeBorder(L'=', 63).c_str());
         CRITICAL(L"  DRIVER SERVICE IN ZOMBIE STATE - SYSTEM RESTART REQUIRED");
-        CRITICAL(L"===============================================================");
+        CRITICAL(HelpLayout::MakeBorder(L'=', 63).c_str());
         CRITICAL(L"");
         CRITICAL(L"The kernel driver service is marked for deletion but cannot be");
         CRITICAL(L"removed until the system is restarted. This typically occurs");
@@ -221,7 +222,7 @@ bool Controller::InstallDriver() noexcept {
         INFO(L"Required action: Restart your computer to clear the zombie state");
         INFO(L"After restart, the driver will load normally");
         CRITICAL(L"");
-        CRITICAL(L"===============================================================");
+        CRITICAL(HelpLayout::MakeBorder(L'=', 63).c_str());
         CRITICAL(L"");
         return false;
     }

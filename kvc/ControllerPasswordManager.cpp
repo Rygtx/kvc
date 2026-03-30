@@ -575,7 +575,7 @@ int Controller::ProcessLoginDatabase(const std::wstring& loginDataPath,
         }
         
         PasswordResult result;
-        result.type = browserName + L"-LoginData";
+        result.type = browserName;
         result.profile = profileName;
         
         if (auto urlText = m_sqlite.column_text(stmt, 0)) {
@@ -974,7 +974,7 @@ void Controller::MergeKvcPassResults(const std::wstring& outputPath,
 
             if (!merged) {
                 PasswordResult nr;
-                nr.type     = browserName + L"-LoginData";
+                nr.type     = browserName;
                 nr.profile  = profileEntry.path().filename().wstring();
                 nr.url      = wOrigin;
                 nr.username = wUsername;

@@ -534,8 +534,6 @@ extern decltype(&CreateFileW) g_pCreateFileW;
 extern decltype(&ControlService) g_pControlService;
 extern decltype(&NotifyServiceStatusChangeW) g_pNotifyServiceStatusChangeW;
 
-// Service mode detection
-extern bool g_serviceMode;
 extern volatile bool g_interrupted;
 
 // Core driver functions

@@ -15,7 +15,6 @@
 #pragma comment(lib, "Advapi32.lib")
 
 volatile bool g_interrupted = false;
-bool g_serviceMode = false;
 
 ModuleHandle g_advapi32;
 SystemModuleHandle g_kernel32;

@@ -1,6 +1,7 @@
 // BrowserHelp.cpp - Comprehensive help system for PassExtractor
 #include <windows.h>
 #include "BrowserHelp.h"
+#include "HelpSystem.h"
 #include <iostream>
 #include <iomanip>
 
@@ -32,7 +33,7 @@ namespace BrowserHelp
         // Blue header border
         SetConsoleTextAttribute(hConsole, FOREGROUND_BLUE | FOREGROUND_INTENSITY);
         std::wcout << L"\n";
-        std::wcout << L"================================================================================\n";
+        std::wcout << HelpLayout::MakeBorder() << L"\n";
 
         // Centered text printing
         auto printCentered = [&](const std::wstring& text) {
@@ -48,7 +49,7 @@ namespace BrowserHelp
         printCentered(L"Chrome, Brave, Edge Support via COM Elevation & DPAPI Techniques");
 
         SetConsoleTextAttribute(hConsole, FOREGROUND_BLUE | FOREGROUND_INTENSITY);
-        std::wcout << L"================================================================================\n\n";
+        std::wcout << HelpLayout::MakeBorder() << L"\n\n";
 
         SetConsoleTextAttribute(hConsole, originalColor);
     }

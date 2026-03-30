@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <iostream>
 #include <string>
+#include "HelpSystem.h"
 
 namespace Banner
 {
@@ -32,7 +33,7 @@ namespace Banner
         // Top border
         SetConsoleTextAttribute(hConsole, frameColor);
         std::wcout << L"\n";
-        std::wcout << L"================================================================================\n";
+        std::wcout << HelpLayout::MakeBorder() << L"\n";
 
         // Banner content - centered white text
         PrintCentered(hConsole, L"Marek Wesolowski - WESMAR - 2025", textColor, width);
@@ -44,7 +45,7 @@ namespace Banner
 
         // Bottom border
         SetConsoleTextAttribute(hConsole, frameColor);
-        std::wcout << L"================================================================================\n\n";
+        std::wcout << HelpLayout::MakeBorder() << L"\n\n";
 
         // Restore original color
         SetConsoleTextAttribute(hConsole, originalColor);

@@ -3,6 +3,7 @@
 #include "Controller.h"
 #include "common.h"
 #include "Utils.h"
+#include "HelpSystem.h"
 #include "TrustedInstallerIntegrator.h"
 #include <filesystem>
 #include <array>
@@ -331,14 +332,14 @@ bool Controller::DeployUnderVolter() noexcept
 
         // 4. Warning + confirmation
         printf("\n");
-        printf("  ================================================================\n");
+        printf("  %s\n",  HelpLayout::MakeBorderA('=', 64).c_str());
         printf("  |        UnderVolter EFI Deployment - WARNING                  |\n");
-        printf("  |--------------------------------------------------------------|\n");
+        printf("  |%s|\n", HelpLayout::MakeBorderA('-', 62).c_str());
         printf("  |  This will write files to the EFI System Partition.          |\n");
         printf("  |  Incorrect deployment may prevent Windows from booting.      |\n");
         printf("  |  KVC backs up BOOTX64.EFI before replacement.                |\n");
         printf("  |  Use 'kvc undervolter remove' to revert at any time.         |\n");
-        printf("  ================================================================\n");
+        printf("  %s\n",  HelpLayout::MakeBorderA('=', 64).c_str());
         printf("\n");
         printf("  Deployment mode:\n");
         printf("\n");

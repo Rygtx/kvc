@@ -66,7 +66,7 @@ namespace TableFormat {
         std::wcout << std::left << std::setw(Columns::DLL_SIG) << L" DLL sig. level" << VBAR;
         std::wcout << std::left << std::setw(Columns::KERNEL_ADDR) << L"Kern. (ffff)"; // No VBAR at end
         
-        std::wcout << NL << Utils::ProcessColors::RESET;
+        std::wcout << Utils::ProcessColors::RESET << NL;
     }
 
     // Print complete table header
@@ -160,7 +160,7 @@ namespace TableFormat {
         std::wcout << std::right << std::setw(Columns::KERNEL_ADDR) 
                    << std::hex << (entry.KernelAddress & 0xFFFFFFFFFFFF) << std::dec;
         
-        std::wcout << NL << Utils::ProcessColors::RESET;
+        std::wcout << Utils::ProcessColors::RESET << NL;
     }
 
     // Print table footer divider

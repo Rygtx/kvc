@@ -1,75 +1,98 @@
 // DefenderManager.h
-// Windows Defender security engine control via registry operations (privileged, restart required)
+// Windows Defender engine control via IFEO registry manipulation.
+//
+// disable: offline hive edit adds Debugger=systray.exe to MsMpEng.exe IFEO key.
+//          Windows loader intercepts every subsequent launch — restart required
+//          because the engine is already running.
+// enable:  offline hive edit removes the Debugger block, then starts WinDefend
+//          via SCM so the engine re-launches immediately — no restart needed.
+//
+// Both operations use RegSaveKeyEx → RegLoadKey(TempIFEO) → edit →
+// RegUnLoadKey → RegRestoreKey(REG_FORCE_RESTORE) to bypass the DACL on the
+// IFEO subtree.  Only SE_BACKUP_NAME + SE_RESTORE_NAME are required.
 
 #pragma once
 
 #include <windows.h>
 #include <string>
 #include <vector>
-#include <memory>
 
-// Manage Windows Defender by swapping service dependencies in the registry (requires privileges, restart)
 class DefenderManager {
 public:
-    // Security engine state based on WinDefend service dependency
+    // Coarse summary for the status display.
     enum class SecurityState {
-        ENABLED,    // Defender engine active (RpcSs)
-        DISABLED,   // Defender engine inactive (RpcSs\x200B)
-        UNKNOWN     // State could not be determined
+        ACTIVE,         // Engine running, no IFEO block
+        IFEO_BLOCKED,   // Debugger intercept set — engine dead or will die after restart
+        INACTIVE,       // WinDefend stopped, no IFEO block (another AV or manual stop)
+        NOT_INSTALLED,  // WinDefend service absent
+        UNKNOWN
     };
 
-    // Disable Windows Defender by changing service dependency to RpcSs\x200B (requires admin + restart)
+    // Rich point-in-time snapshot returned by QueryStatus().
+    struct DefenderStatus {
+        SecurityState   state;
+        bool            ifeoBlocked;        // Debugger value present on MsMpEng.exe IFEO key
+        bool            winDefendRunning;   // WinDefend service in SERVICE_RUNNING state
+        bool            msmpengRunning;     // MsMpEng.exe process visible in snapshot
+        std::wstring    ifeoDebugger;       // Current Debugger value, empty if not set
+    };
+
+    // Offline IFEO edit — adds Debugger block.  Restart required to take full effect.
     static bool DisableSecurityEngine() noexcept;
-    
-    // Enable Windows Defender by restoring service dependency to RpcSs (requires admin + restart)
+
+    // Offline IFEO edit — removes Debugger block, then starts WinDefend via SCM.
     static bool EnableSecurityEngine() noexcept;
-    
-    // Query current Defender state by reading service dependency (read-only, safe)
+
+    // Full three-part status query (IFEO + service + process).
+    static DefenderStatus QueryStatus() noexcept;
+
+    // Derived single-value state for callers that only need a summary.
     static SecurityState GetSecurityEngineStatus() noexcept;
 
 private:
-    // Temporary registry snapshot context for atomic service-hive modifications
-    struct RegistryContext {
-        std::wstring tempPath;      // Temp directory for hive files
-        std::wstring hiveFile;      // Saved Services hive path
-        
-        RegistryContext() = default;
-        ~RegistryContext() { Cleanup(); } // Auto-cleanup of temp files
-        
-        RegistryContext(const RegistryContext&) = delete;
-        RegistryContext& operator=(const RegistryContext&) = delete;
-        RegistryContext(RegistryContext&&) = default;
-        RegistryContext& operator=(RegistryContext&&) = default;
-        
-        // Remove temporary hive and transaction files (idempotent, handles locks)
+    // RAII holder for the temporary hive file and associated transaction artefacts.
+    struct HiveContext {
+        std::wstring tempPath;
+        std::wstring hiveFile;
+
+        HiveContext()  = default;
+        ~HiveContext() { Cleanup(); }
+        HiveContext(const HiveContext&)            = delete;
+        HiveContext& operator=(const HiveContext&) = delete;
+        HiveContext(HiveContext&&)                 = default;
+        HiveContext& operator=(HiveContext&&)      = default;
+
         void Cleanup() noexcept;
     };
 
-    // Core modify workflow (enable==true to enable engine, false to disable) using snapshot/restore
-    static bool ModifySecurityEngine(bool enable) noexcept;
-    
-    // Enable required privileges: SE_BACKUP_NAME, SE_RESTORE_NAME, SE_LOAD_DRIVER_NAME
+    // Enable SE_BACKUP_NAME + SE_RESTORE_NAME on the current token.
     static bool EnableRequiredPrivileges() noexcept;
-    
-    // Create temporary Services hive snapshot and load it under HKLM\Temp
-    static bool CreateRegistrySnapshot(RegistryContext& ctx) noexcept;
-    
-    // Switch WinDefend DependOnService between RpcSs\x200B and RpcSs inside temp hive
-    static bool ModifyDefenderDependencies(const RegistryContext& ctx, bool enable) noexcept;
-    
-    // Unload temp hive and restore modified snapshot to live Services key (critical operation)
-    static bool RestoreRegistrySnapshot(const RegistryContext& ctx) noexcept;
-    
-    // Read REG_MULTI_SZ into vector; returns empty vector on error or missing value
-    static std::vector<std::wstring> ReadMultiString(HKEY key, const std::wstring& valueName) noexcept;
-    
-    // Write vector as REG_MULTI_SZ (handles empty/single entries and double-null terminator)
-    static bool WriteMultiString(HKEY key, const std::wstring& valueName, const std::vector<std::wstring>& values) noexcept;
-    
-    // Registry constants
-    static constexpr const wchar_t* WINDEFEND_KEY = L"SYSTEM\\CurrentControlSet\\Services\\WinDefend";
-    static constexpr const wchar_t* SERVICES_KEY = L"SYSTEM\\CurrentControlSet\\Services";
-    static constexpr const wchar_t* DEPEND_VALUE = L"DependOnService";
-    static constexpr const wchar_t* RPC_SERVICE_ACTIVE = L"RpcSs";
-    static constexpr const wchar_t* RPC_SERVICE_INACTIVE = L"RpcSs\x200B";
+
+    // Save HKLM\IFEO_KEY → hiveFile, load as HKLM\TempIFEO.
+    static bool CreateIFEOSnapshot(HiveContext& ctx) noexcept;
+
+    // Create or remove HKLM\TempIFEO\MsMpEng.exe Debugger value.
+    static bool ModifyMsMpEngIFEO(const HiveContext& ctx, bool addBlock) noexcept;
+
+    // Unload TempIFEO, restore hiveFile → HKLM\IFEO_KEY (REG_FORCE_RESTORE).
+    static bool RestoreIFEOSnapshot(const HiveContext& ctx) noexcept;
+
+    // Open SCM and call StartService on WinDefend.
+    static bool StartWinDefend() noexcept;
+
+    // Snapshot process list and look for MsMpEng.exe.
+    static bool IsMsMpEngRunning() noexcept;
+
+    // Query WinDefend service status.
+    static bool IsWinDefendRunning() noexcept;
+
+    // Registry path constants.
+    static constexpr const wchar_t* IFEO_KEY =
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options";
+    static constexpr const wchar_t* MSMPENG_SUBKEY =
+        L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\MsMpEng.exe";
+    static constexpr const wchar_t* TEMP_HIVE_NAME  = L"TempIFEO";
+    static constexpr const wchar_t* DEBUGGER_VALUE  = L"Debugger";
+    static constexpr const wchar_t* DEBUGGER_PAYLOAD = L"systray.exe";
+    static constexpr const wchar_t* WINDEFEND_SVC   = L"WinDefend";
 };

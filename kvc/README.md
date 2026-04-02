@@ -35,8 +35,6 @@ When this value is present, the Windows loader hands every `MsMpEng.exe` launch 
 
 </details>
 
-> **Need to disable Defender without a restart?** See [KvcKiller](https://github.com/wesmar/kvcKiller/) - kills the engine via a vulnerable kernel driver (BYOVD), then applies the same IFEO block in one step.
-
 ---
 
 **[30.03.2026]**
@@ -1080,19 +1078,6 @@ graph TD
     Removes the `Debugger` value (and the `MsMpEng.exe` IFEO key if it becomes empty), then calls `StartService(WinDefend)` via SCM. `MsMpEng.exe` launches within seconds — **no restart needed**.
 
 **Warning:** Disabling the core security engine significantly reduces system protection. Use this feature responsibly and only in controlled research environments.
-
-### Restart-free alternative: KvcKiller
-
-`kvc secengine disable` requires a restart because kvc.sys can strip PP/PPL protection from `MsMpEng.exe` but cannot force-terminate the process — it defends itself beyond the protection level. The IFEO block takes effect only after the next boot.
-
-**[KvcKiller](https://github.com/wesmar/kvcKiller/)** solves this differently. It uses a BYOVD kernel driver (`wsftprm.sys`, CVE-2023-52271) that terminates processes directly from ring-0 via `ZwTerminateProcess` — bypassing all user-mode callbacks and PPL entirely. The kill and the IFEO paralyze block happen in a single operation: the engine is dead immediately, and the IFEO entry prevents it from being restarted by SCM or Defender's own watchdog. No reboot required.
-
-| | kvc secengine disable | KvcKiller |
-|---|---|---|
-| Kills running engine | no | yes (ring-0 BYOVD) |
-| IFEO block (prevents restart) | yes | yes |
-| Restart required | **yes** | **no** |
-| Requires kvc.sys | yes | no (own driver) |
 
 -----
 

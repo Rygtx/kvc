@@ -327,49 +327,92 @@ int HandleSecEngineCommand(int argc, wchar_t* argv[]) {
         return 1;
     }
     std::wstring_view sub = argv[2];
-    bool restart = (argc > 3 && std::wstring(argv[3]) == L"--restart");
 
+    // ── disable ──────────────────────────────────────────────────────────────
+    // Sets IFEO Debugger=systray.exe on MsMpEng.exe via offline hive edit.
+    // The engine is already running so restart is required; --restart triggers
+    // an immediate system restart after the IFEO block is written.
     if (sub == L"disable") {
-        INFO(L"Disabling Windows Defender (requires restart)...");
+        bool doRestart = (argc > 3 && std::wstring(argv[3]) == L"--restart");
         if (DefenderManager::DisableSecurityEngine()) {
-            SUCCESS(L"Security engine disabled successfully - restart required");
-            if (restart) { INFO(L"Initiating system restart..."); InitiateSystemRestart(); }
+            if (doRestart) {
+                INFO(L"Initiating system restart...");
+                InitiateSystemRestart();
+            }
             return 0;
         }
         return 1;
     }
+
+    // ── enable ───────────────────────────────────────────────────────────────
+    // Removes IFEO Debugger block, then starts WinDefend via SCM.
+    // MsMpEng.exe launches on its own — no restart needed.
     if (sub == L"enable") {
-        INFO(L"Enabling Windows Defender (requires restart)...");
         if (DefenderManager::EnableSecurityEngine()) {
-            SUCCESS(L"Security engine enabled successfully - restart required");
-            if (restart) { INFO(L"Initiating system restart..."); InitiateSystemRestart(); }
             return 0;
         }
         return 1;
     }
+
+    // ── status ───────────────────────────────────────────────────────────────
     if (sub == L"status") {
-        auto status = DefenderManager::GetSecurityEngineStatus();
-        HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-        
-        if (status == DefenderManager::SecurityState::ENABLED) {
-            INFO(L"Security Engine Status: ENABLED (Active Protection)");
-            SetConsoleTextAttribute(hConsole, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-            std::wcout << L" Windows Defender is actively protecting the system\n";
-        } else if (status == DefenderManager::SecurityState::DISABLED) {
-            INFO(L"Security Engine Status: DISABLED (Inactive Protection)");
-            SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_INTENSITY);
-            std::wcout << L" Windows Defender protection is disabled\n";
+        auto s = DefenderManager::QueryStatus();
+        HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
+
+        // IFEO block line
+        if (s.ifeoBlocked) {
+            SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_INTENSITY);
+            std::wcout << L" [IFEO] MsMpEng.exe blocked — Debugger=" << s.ifeoDebugger << L"\n";
         } else {
-            INFO(L"Security Engine Status: UNKNOWN (Cannot determine state)");
-            SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-            std::wcout << L" Unable to determine Defender protection state\n";
+            SetConsoleTextAttribute(hCon, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+            std::wcout << L" [IFEO] No block set on MsMpEng.exe\n";
         }
-        SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE); // Reset
+
+        // WinDefend service line
+        SetConsoleTextAttribute(hCon, s.winDefendRunning
+            ? (FOREGROUND_GREEN | FOREGROUND_INTENSITY)
+            : (FOREGROUND_RED   | FOREGROUND_INTENSITY));
+        std::wcout << L" [SVC]  WinDefend: "
+                   << (s.winDefendRunning ? L"RUNNING" : L"STOPPED") << L"\n";
+
+        // MsMpEng process line
+        SetConsoleTextAttribute(hCon, s.msmpengRunning
+            ? (FOREGROUND_GREEN | FOREGROUND_INTENSITY)
+            : (FOREGROUND_RED   | FOREGROUND_INTENSITY));
+        std::wcout << L" [PROC] MsMpEng.exe: "
+                   << (s.msmpengRunning ? L"RUNNING" : L"NOT RUNNING") << L"\n";
+
+        // Summary line
+        SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+        std::wcout << L" [SUM]  ";
+        switch (s.state) {
+            case DefenderManager::SecurityState::ACTIVE:
+                SetConsoleTextAttribute(hCon, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+                std::wcout << L"ACTIVE — Defender engine is running\n";
+                break;
+            case DefenderManager::SecurityState::IFEO_BLOCKED:
+                SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_INTENSITY);
+                std::wcout << L"IFEO BLOCKED — engine will not launch (restart to fully deactivate)\n";
+                break;
+            case DefenderManager::SecurityState::INACTIVE:
+                SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+                std::wcout << L"INACTIVE — WinDefend stopped, no IFEO block\n";
+                break;
+            case DefenderManager::SecurityState::NOT_INSTALLED:
+                SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+                std::wcout << L"NOT INSTALLED — WinDefend service not found\n";
+                break;
+            default:
+                std::wcout << L"UNKNOWN\n";
+                break;
+        }
+
+        SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
         return 0;
     }
-    
+
     ERROR(L"Invalid secengine subcommand: %s", std::wstring(sub).c_str());
-    ERROR(L"Valid subcommands: disable, enable, status");
+    ERROR(L"Valid subcommands: disable [--restart], enable, status");
     return 1;
 }
 
@@ -653,10 +696,11 @@ int wmain(int argc, wchar_t* argv[])
         // --- Defender & Security ---
         {L"secengine", HandleSecEngineCommand},
         {L"disable-defender", [](int argc, wchar_t** argv) {
-            INFO(L"Disabling Windows Defender (requires restart)...");
             bool r = DefenderManager::DisableSecurityEngine();
-            if(r) { SUCCESS(L"Windows Defender disabled successfully"); INFO(L"System restart required to apply changes"); }
-            if(r && argc >= 3 && std::wstring(argv[2]) == L"--restart") { INFO(L"Initiating system restart..."); InitiateSystemRestart(); }
+            if (r && argc >= 3 && std::wstring(argv[2]) == L"--restart") {
+                INFO(L"Initiating system restart...");
+                InitiateSystemRestart();
+            }
             return r ? 0 : 2;
         }},
         {L"enable-defender", [](int, wchar_t**) { return DefenderManager::EnableSecurityEngine() ? 0 : 2; }},

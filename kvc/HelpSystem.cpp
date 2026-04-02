@@ -246,13 +246,23 @@ void HelpSystem::PrintDefenderCommands() noexcept
 void HelpSystem::PrintSecurityEngineCommands() noexcept
 {
     PrintSectionHeader(L"Security Engine Management");
-    PrintCommandLine(L"secengine disable", L"Disable Windows Defender security engine");
-    PrintCommandLine(L"secengine enable", L"Enable Windows Defender security engine"); 
-    PrintCommandLine(L"secengine status", L"Check current security engine status");
-    PrintCommandLine(L"secengine disable --restart", L"Disable and restart system immediately");
-    PrintCommandLine(L"secengine enable --restart", L"Enable and restart system immediately");
-    PrintNote(L"Registry-level manipulation - bypasses tamper protection");
-    PrintNote(L"System restart required for changes to take effect");
+    PrintCommandLine(L"secengine disable [--restart]", L"Block MsMpEng.exe via IFEO (restart required)");
+    PrintCommandLine(L"secengine enable",              L"Remove IFEO block, start WinDefend (no restart)");
+    PrintCommandLine(L"secengine status",              L"Show IFEO block / service / process state");
+    PrintNote(L"Offline IFEO hive edit - bypasses DACL on protected registry keys");
+    PrintNote(L"disable: engine already running; only blocks future launches until restart");
+    PrintNote(L"enable:  WinDefend launched via SCM; MsMpEng.exe starts without restart");
+
+    // Examples
+    auto ex = [](const wchar_t* cmd, const wchar_t* desc) {
+        std::wcout << L"  " << std::left << std::setw(HelpLayout::EXAMPLE_CMD_WIDTH)
+                   << cmd << L"# " << desc << L"\n";
+    };
+    std::wcout << L"\n  Examples:\n";
+    ex(L"kvc secengine status",           L"Show current IFEO block, WinDefend and MsMpEng state");
+    ex(L"kvc secengine disable",          L"Set IFEO block - restart manually when ready");
+    ex(L"kvc secengine disable --restart",L"Set IFEO block and reboot immediately");
+    ex(L"kvc secengine enable",           L"Clear block and start Defender engine right now");
     std::wcout << L"\n";
 }
 
@@ -532,11 +542,10 @@ void HelpSystem::PrintUsageExamples(std::wstring_view programName) noexcept
     printLine(L"kvc remove-exclusion Processes cmd.exe", L"Remove process exclusion");
     
     // Security engine control
-    printLine(L"kvc secengine status", L"Check Windows Defender status");
-    printLine(L"kvc secengine disable", L"Disable Windows Defender engine");
-    printLine(L"kvc secengine enable", L"Re-enable Windows Defender engine");
-    printLine(L"kvc secengine disable --restart", L"Disable Defender and restart system");
-    printLine(L"kvc secengine enable --restart", L"Enable Defender and restart system");
+    printLine(L"kvc secengine status",           L"IFEO block / WinDefend / MsMpEng state");
+    printLine(L"kvc secengine disable",          L"Block MsMpEng.exe via IFEO (restart required)");
+    printLine(L"kvc secengine disable --restart",L"Block and reboot immediately");
+    printLine(L"kvc secengine enable",           L"Remove IFEO block, start WinDefend (no restart)");
     
     // Defender UI automation (Real-Time Protection / Tamper Protection)
     printLine(L"kvc rtp status", L"Check Real-Time Protection status");

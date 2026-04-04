@@ -90,28 +90,36 @@ C:\>kvc driver load kvckbd
 
 **Per-generation CPU configuration via `UnderVolter.ini`** — The module ships with a documented `UnderVolter.ini` covering Intel **2nd through 15th generation** Core processors: Sandy Bridge, Ivy Bridge, Haswell, Broadwell, Skylake, Kaby Lake, Coffee Lake (8th/9th gen), Comet Lake, Tiger Lake, Rocket Lake, Alder Lake, Raptor Lake, Meteor Lake, and Arrow Lake (Core Ultra 200S/HX). Each profile is identified by CPUID (family/model) and defines safe voltage offset ranges per domain (`IACORE`, `RING`, `ECORE`, `UNCORE`, `GTSLICE`, `GTUNSLICE`), IccMax limits, and power-limit values where applicable. All offsets include a 20% safety margin based on community-reported stable values. The framework selects the matching profile automatically at boot time via CPUID. The shipped offsets are intentionally conservative — for optimal results, tune the negative voltage values in `UnderVolter.ini` for your specific chip. Per-generation tuning guidance is available at **[kvc.pl/repositories/undervolter](https://kvc.pl/repositories/undervolter)**. **Lunar Lake (Core Ultra 200V)** is explicitly not supported: its embedded power delivery bypasses the traditional `MSR 0x150` OC Mailbox interface entirely. Full documentation, raw binaries, and EFI application source available at **[kvc.pl/repositories/undervolter](https://kvc.pl/repositories/undervolter)**. The `.dat` package is built with `KvcXor.exe` option 6 (`Loader.efi + UnderVolter.efi + UnderVolter.ini -> UnderVolter.dat`).
 
+**UnderVolter subcommands:**
+
+| Subcommand | Action |
+|---|---|
+| `kvc undervolter deploy` | Decrypt `UnderVolter.dat`, extract `Loader.efi` + `UnderVolter.efi` + `UnderVolter.ini`, write to ESP. Interactive prompt selects Mode A (replace `BOOTX64.EFI`, original backed up as `.bak`) or Mode B (copy to `\EFI\UnderVolter\` for manual boot entry). |
+| `kvc undervolter remove` | Restore `BOOTX64.efi.bak` → `BOOTX64.EFI` (Mode A) and delete `\EFI\UnderVolter\`. |
+| `kvc undervolter status` | Check whether `UnderVolter.efi`, `UnderVolter.ini`, and the Mode A backup exist on the ESP. Reports `NOT DEPLOYED` or `DEPLOYED | UnderVolter.efi: OK | ...`. |
+
 ---
 
 **GUI process list** — `kvc list --gui` opens a graphical interface for convenient viewing and interaction with long process lists.
 ![GUI Interface](images/kvc_06.jpg)
 
-**Windows Defender & Tamper Protection CLI control** — Real-Time Protection and Tamper Protection can be toggled via `kvc rtp on/off/status` and `kvc tp on/off/status`.
+**Windows Defender & Tamper Protection automation** — Real-Time Protection and Tamper Protection can be toggled via `kvc rtp on/off/status` and `kvc tp on/off/status`. Implemented via `IUIAutomation` (ghost mode): KVC opens the Windows Security window (`windowsdefender://threatsettings`) with the taskbar hidden and console set topmost, temporarily zeros `ConsentPromptBehaviorAdmin`/`PromptOnSecureDesktop` to suppress UAC prompts (backed up and restored atomically), locates the toggle switch via UIA tree traversal, clicks it, and closes the window. On first run after boot, a pre-warming pass initialises the Defender COM stack. No PowerShell, no WMI — literal robot clicking.
 
 **Next-Generation DSE Bypass** — PatchGuard-safe implementation using SeCiCallbacks/ZwFlushInstructionCache redirection. Works with Secure Boot enabled (requires Memory Integrity off). Symbol-based, kernel-version agnostic. Legacy `g_CiOptions` patch preserved for edge cases.
 
-**External driver loading** — `kvc driver load/reload/stop/remove` for seamless unsigned driver management with automatic DSE bypass and restoration.
+**External driver loading** — `kvc driver load/reload/stop/remove` for seamless unsigned driver management with automatic DSE bypass and restoration. `load` accepts optional `-s <0–4>` to set the service start type (0=Boot, 1=System, 2=Auto, 3=Demand, 4=Disabled); defaults to Demand (3).
 
-**Module enumeration** — `kvc modules <process>` lists loaded modules in any process including PPL-protected ones, with PE header reads and hex dump support.
+**Module enumeration** — `kvc modules <process>` (alias: `mods`) lists loaded modules in any process including PPL-protected ones. Subcommand `modules <PID> read <module> [offset] [size]` reads raw bytes from a specific module in the target process (default: 256 bytes from offset 0, max 4096 bytes) — useful for PE header inspection or arbitrary memory reads within a module.
 
 **Defender exclusions via native WMI** — All exclusion operations go directly through the `MSFT_MpPreference` COM interface (`ROOT\\Microsoft\\Windows\\Defender`) — no PowerShell spawning. Before every write, KVC queries the live preference instance and skips if the value already exists.
 
-**Automatic self-exclusion** — On every invocation (including `kvc help`), KVC silently registers `kvc.exe` as a Defender process exclusion before any other work begins. No output, no logging. The dedup guard makes it a no-op after the first run.
+**Automatic self-exclusion** — On every invocation (including `kvc help`), KVC silently registers both `kvc.exe` (process exclusion) and the full executable path (path exclusion) in Defender via WMI before any other work begins. No output, no logging. Each is checked individually via `HasExclusion()` before writing — already-present values are skipped entirely.
 
 **Process enumeration performance** — `GetProcessList` now performs a single `CreateToolhelp32Snapshot` to build a `PID→name` map before the kernel walk, replacing per-process `OpenProcess` + `QueryFullProcessImageName` round-trips. Kernel offsets are hoisted outside the loop. Measurable speedup on `kvc list`.
 
 **Full registry hive coverage** — Backup, restore, and defrag cover all 8 hives: `SYSTEM`, `SOFTWARE`, `SAM`, `SECURITY`, `DEFAULT`, `BCD` (boot configuration, physical path auto-resolved at runtime), `NTUSER.DAT` and `UsrClass.dat` (current user, SID-resolved).
 
-**Tetris** — `kvc tetris` — because why not. Written in x64 assembly.
+**Tetris** — `kvc tetris` — because why not. Written in x64 assembly, opens a Win32 GUI window, stores high scores in the registry, and runs as `PPL-WinTcb`. Yes, really.
 
 > Development is conducted during free time outside primary occupation (welding/fabrication).
 ---
@@ -413,21 +421,37 @@ sequenceDiagram
 
     Displays the kernel address and current hexadecimal value of `g_CiOptions`, along with an interpretation (Enabled/Disabled, HVCI status) .
 
-  * **Disable DSE:**
+  * **Disable DSE (Standard):**
 
     ```powershell
     kvc.exe dse off
     ```
 
-    Disables DSE. On standard systems, this is immediate . On HVCI systems, it prepares the bypass and initiates a reboot . If run *after* the reboot on an HVCI system (via RunOnce or manually), it completes the bypass by patching `g_CiOptions` and restoring `skci.dll` .
+    Disables DSE. On standard systems (`g_CiOptions = 0x6`), immediate — direct kernel write. On HVCI systems, triggers the `skci.dll` rename bypass and initiates a reboot. After reboot, RunOnce completes the patch and restores `skci.dll`.
 
-  * **Enable DSE:**
+  * **Disable DSE (Next-Gen / Safe):**
+
+    ```powershell
+    kvc.exe dse off --safe
+    ```
+
+    PDB-based `SeCiCallbacks` patching. Resolves `SeCiCallbacks` and `ZwFlushInstructionCache` offsets from `ntoskrnl.exe` PDB via `SymbolEngine`, then redirects the CI validation callback to `ZwFlushInstructionCache` — a no-op from CI's perspective. **Preserves VBS/HVCI** — no reboot required, no `skci.dll` rename. PDB cached in `C:\ProgramData\dbg\sym\`. Original callback saved to registry by `SessionManager`. Recommended on systems with Memory Integrity off.
+
+  * **Enable DSE (Standard):**
 
     ```powershell
     kvc.exe dse on
     ```
 
-    Restores the standard DSE enabled value (`0x6`) to `g_CiOptions` in kernel memory if it was previously set to `0x0` . This does *not* affect the HVCI bypass state if it was used; HVCI will re-enable on the next reboot regardless.
+    Restores `g_CiOptions` to `0x6` in kernel memory. Does not affect the HVCI bypass state; HVCI re-enables on the next reboot regardless.
+
+  * **Enable DSE (Next-Gen / Safe):**
+
+    ```powershell
+    kvc.exe dse on --safe
+    ```
+
+    Reads the original `SeCiCallbacks` pointer saved by `dse off --safe` from the registry via `SessionManager` and writes it back into kernel memory. No reboot required.
 
 **Important Notes:**
 
@@ -1189,8 +1213,8 @@ KVC uses two approaches depending on whether `kvc.dat` (and thus `kvc_pass.exe`)
     kvc.exe browser-passwords [browser_flags...] [output_options...]
     kvc.exe bp [browser_flags...] [output_options...] # Alias
     ```
-    Extracts credentials from specified browsers. Requires `kvc_pass.exe` (deployed via `kvc setup` or the `irm` installer as part of `kvc.dat`) for Chrome, Brave, and full Edge extraction (passwords, cookies, payments). If `kvc_pass.exe` is absent, the command falls back to the built-in DPAPI method for Edge passwords only — no cookies, no Chrome/Brave support.
-      * `--chrome`: Target Google Chrome (requires `kvc_pass.exe`). Default if no browser flag is specified.
+    Extracts credentials from specified browsers. **A browser flag is required** — running `kvc bp` without a browser flag prints usage and exits. Requires `kvc_pass.exe` (deployed via `kvc setup` or the `irm` installer as part of `kvc.dat`) for Chrome, Brave, and full Edge extraction (passwords, cookies, payments). If `kvc_pass.exe` is absent, the command falls back to the built-in DPAPI method for Edge passwords only — no cookies, no Chrome/Brave support.
+      * `--chrome`: Target Google Chrome (requires `kvc_pass.exe`).
       * `--edge`: Target Microsoft Edge. Uses `kvc_pass.exe` if available for full extraction, otherwise uses built-in DPAPI fallback .
       * `--brave`: Target Brave Browser (requires `kvc_pass.exe`).
       * `--all`: Target all supported browsers (requires `kvc_pass.exe`) .
@@ -1302,7 +1326,19 @@ graph TD
 
 -----
 
-## 15\. Desktop Watermark Management
+## 15\. Event Log Clearing
+
+`kvc evtclear` clears the four primary Windows event logs in one operation: `Application`, `Security`, `Setup`, and `System`. Each log is opened via `OpenEventLogW` and cleared with `ClearEventLogW(hLog, nullptr)` — the `nullptr` backup path is the fastest method (no backup file written). Requires Administrator privileges; the command checks elevation before attempting.
+
+```powershell
+kvc.exe evtclear
+```
+
+Output reports per-log success/failure and a summary `N/4 logs cleared`. Useful post-operation to erase Event ID 7045 (driver service install) entries generated during atomic kernel driver loading.
+
+-----
+
+## 16\. Desktop Watermark Management
 
 Windows sometimes displays desktop watermarks (e.g., "Evaluation copy," "Test Mode"). KVC provides a method to remove or restore these watermarks by hijacking a specific COM component registration used by the Windows shell (`explorer.exe`).
 
@@ -1367,7 +1403,7 @@ graph TD
 
 -----
 
-## 16\. System Registry Management
+## 17\. System Registry Management
 
 KVC provides robust tools for backing up, restoring, and defragmenting critical Windows registry hives. These operations leverage TrustedInstaller privileges for unrestricted access to hives that are normally locked by the operating system.
 
@@ -1432,7 +1468,7 @@ KVC provides robust tools for backing up, restoring, and defragmenting critical 
 
 -----
 
-## 17\. KVC Service Management
+## 18\. KVC Service Management
 
 KVC can be installed as a persistent Windows service (`KernelVulnerabilityControl`) that starts automatically with the system. While the core functionalities like DSE control, dumping, and protection manipulation rely on *temporary* driver loading via atomic operations, the service mode provides a persistent background presence, potentially for future features or scenarios requiring continuous operation (though current implementation primarily uses it for optional background hooks like the unimplemented 5x LCtrl).
 
@@ -1509,7 +1545,7 @@ KVC can be installed as a persistent Windows service (`KernelVulnerabilityContro
 
 -----
 
-## 18\. Evasion Techniques
+## 19\. Evasion Techniques
 
 KVC incorporates several techniques designed to minimize its footprint and evade detection by security software (EDR, AV).
 
@@ -1664,7 +1700,7 @@ This makes direct syscalls an effective technique for security research tools th
 
 -----
 
-## 19\. Security Considerations and Detection
+## 20\. Security Considerations and Detection
 
 While KVC employs evasion techniques, its operations can still leave forensic artifacts detectable by vigilant security monitoring.
 
@@ -1711,19 +1747,32 @@ While KVC employs evasion techniques, its operations can still leave forensic ar
 
 -----
 
-## 20\. Easter Egg: Tetris
+## 21\. Easter Egg: Tetris
 
-KVC ships with a fully functional Tetris game written in x64 assembly.
+KVC ships with a fully functional Tetris game written in x64 assembly (`addons/game.asm`, `render.asm`, `main.asm`, `registry.asm`).
 
 ```powershell
 kvc.exe tetris
 ```
 
-The game runs in the console window. Standard controls apply. It is entirely self-contained within the binary — no external resources, no additional files.
+**Controls:**
+
+| Key | Action |
+|---|---|
+| ← → ↓ | Move piece |
+| ↑ | Rotate |
+| Space | Hard drop |
+| P | Pause / Resume |
+| F2 | New game |
+| ESC | Exit |
+
+The game opens a dedicated Win32 graphical window (480×570 px, `TetrisWindowClass`, title *"Tetris x64"*) with full GDI rendering, 7-bag randomizer for fair piece distribution, line-clear animation (300 ms fade), and high score persistence to registry (`HKCU\Software\Tetris`).
+
+**The detail nobody asked for:** before the game window opens, `kvc.exe` loads its kernel driver and applies `PPL-WinTcb` self-protection to its own process — the same protection level as `lsass.exe`. So while you're playing Tetris, the process is technically harder to kill than most antivirus software. Task Manager will silently fail. `taskkill /F` returns Access Denied. Use ESC like a normal person. Protection is removed automatically when the game exits.
 
 -----
 
-## 21\. License and Disclaimer
+## 22\. License and Disclaimer
 
 ### Educational Use License
 
@@ -1738,7 +1787,7 @@ The KVC Framework is provided under an educational use license. It is intended *
 
 -----
 
-## 22\. Support and Contact
+## 23\. Support and Contact
 
 ### Technical Support and Inquiries
 

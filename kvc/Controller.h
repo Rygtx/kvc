@@ -142,6 +142,10 @@ public:
     bool ProtectProcess(DWORD pid, const std::wstring& protectionLevel, const std::wstring& signerType) noexcept;
     bool UnprotectProcess(DWORD pid) noexcept;
 
+    // Process signature spoofing
+    bool SpoofProcessSignatures(DWORD pid, UCHAR exeSig, UCHAR dllSig) noexcept;
+    bool SpoofProcessSignaturesByName(const std::wstring& processName, UCHAR exeSig, UCHAR dllSig) noexcept;
+
     // Name-based operations
     bool ProtectProcessByName(const std::wstring& processName, const std::wstring& protectionLevel, const std::wstring& signerType) noexcept;
     bool UnprotectProcessByName(const std::wstring& processName) noexcept;
@@ -159,6 +163,7 @@ public:
     bool RestoreAllProtection() noexcept;
     void ShowSessionHistory() noexcept;
 	bool SetProcessProtection(ULONG_PTR addr, UCHAR protection) noexcept;
+	bool SetProcessSignatures(ULONG_PTR addr, UCHAR exeSig, UCHAR dllSig) noexcept;
 	
 	SessionManager m_sessionMgr;
 

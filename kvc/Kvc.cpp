@@ -669,6 +669,20 @@ int wmain(int argc, wchar_t* argv[])
         // --- Protection ---
         {L"protect", [](int argc, wchar_t** argv) { return HandleProtectionCommand(argc, argv, false); }},
         {L"set",     [](int argc, wchar_t** argv) { return HandleProtectionCommand(argc, argv, true); }},
+        {L"spoof",   [](int argc, wchar_t** argv) {
+            if (argc < 5) { ERROR(L"Missing arguments: <PID/process_name> <EXE_SIG_HEX> <DLL_SIG_HEX>"); return 1; }
+            std::wstring target = argv[2];
+            UCHAR exeSig = static_cast<UCHAR>(std::wcstoul(argv[3], nullptr, 16));
+            UCHAR dllSig = static_cast<UCHAR>(std::wcstoul(argv[4], nullptr, 16));
+            
+            if (IsNumeric(target)) {
+                auto pid = ParsePid(target);
+                if (!pid) { ERROR(L"Invalid PID format: %s", target.c_str()); return 1; }
+                return g_controller->SpoofProcessSignatures(pid.value(), exeSig, dllSig) ? 0 : 2;
+            } else {
+                return g_controller->SpoofProcessSignaturesByName(target, exeSig, dllSig) ? 0 : 2;
+            }
+        }},
         {L"set-signer", [](int argc, wchar_t** argv) {
             if (argc < 5) { ERROR(L"Missing arguments: <CURRENT_SIGNER> <PP|PPL> <NEW_SIGNER>"); return 1; }
             std::wstring cs = argv[2];

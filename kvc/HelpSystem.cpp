@@ -461,6 +461,7 @@ void HelpSystem::PrintUsageExamples(std::wstring_view programName) noexcept
     // Process protection management
     printLine(L"kvc protect 1044 PPL Antimalware", L"Protect process with PPL-Antimalware");
     printLine(L"kvc set 5678 PP Windows", L"Force set PP-Windows protection");
+    printLine(L"kvc spoof 1044 37 07", L"Spoof process signatures (EXE: 0x37, DLL: 0x07)");
     printLine(L"kvc unprotect lsass", L"Remove protection from LSASS");
     printLine(L"kvc unprotect 1,2,3,lsass", L"Batch unprotect multiple targets");
     printLine(L"kvc unprotect Antimalware", L"Remove protection from all Antimalware processes");

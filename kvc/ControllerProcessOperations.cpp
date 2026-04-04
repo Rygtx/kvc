@@ -8,6 +8,8 @@
 
 extern volatile bool g_interrupted;
 
+static void GetOptimalSpoofSignatures(UCHAR signerType, UCHAR& outExeSig, UCHAR& outDllSig) noexcept;
+
 #include <iomanip> // Required for std::setw
 
 // Table formatting constants and utilities for process list display
@@ -407,6 +409,11 @@ bool Controller::ProtectProcess(DWORD pid, const std::wstring& protectionLevel, 
         return false;
     }
 
+    // Automatically spoof signature levels to match the new protection
+    UCHAR exeSig = 0, dllSig = 0;
+    GetOptimalSpoofSignatures(signer.value(), exeSig, dllSig);
+    SetProcessSignatures(kernelAddr.value(), exeSig, dllSig);
+
     SUCCESS(L"Protected PID %d with %s-%s", pid, protectionLevel.c_str(), signerType.c_str());
     EndDriverSession(true);
     return true;
@@ -472,6 +479,11 @@ bool Controller::SetProcessProtection(DWORD pid, const std::wstring& protectionL
         EndDriverSession(true);
         return false;
     }
+
+    // Automatically spoof signature levels to match the new protection
+    UCHAR exeSig = 0, dllSig = 0;
+    GetOptimalSpoofSignatures(signer.value(), exeSig, dllSig);
+    SetProcessSignatures(kernelAddr.value(), exeSig, dllSig);
 
     SUCCESS(L"Set protection %s-%s on PID %d", protectionLevel.c_str(), signerType.c_str(), pid);
     EndDriverSession(true);
@@ -1076,6 +1088,11 @@ bool Controller::ProtectProcessInternal(DWORD pid, const std::wstring& protectio
     bool result = SetProcessProtection(kernelAddr.value(), newProtection);
     
     if (result) {
+        // Automatically spoof signature levels to match the new protection
+        UCHAR exeSig = 0, dllSig = 0;
+        GetOptimalSpoofSignatures(signer.value(), exeSig, dllSig);
+        SetProcessSignatures(kernelAddr.value(), exeSig, dllSig);
+
         SUCCESS(L"Protected PID %d with %s-%s", pid, protectionLevel.c_str(), signerType.c_str());
     } else {
         ERROR(L"Failed to protect PID %d", pid);
@@ -1112,6 +1129,11 @@ bool Controller::SetProcessProtectionInternal(DWORD pid, const std::wstring& pro
     bool result = SetProcessProtection(kernelAddr.value(), newProtection);
     
     if (result) {
+        // Automatically spoof signature levels to match the new protection
+        UCHAR exeSig = 0, dllSig = 0;
+        GetOptimalSpoofSignatures(signer.value(), exeSig, dllSig);
+        SetProcessSignatures(kernelAddr.value(), exeSig, dllSig);
+
         SUCCESS(L"Set protection %s-%s on PID %d", protectionLevel.c_str(), signerType.c_str(), pid);
     } else {
         ERROR(L"Failed to set protection on PID %d", pid);
@@ -1271,6 +1293,81 @@ bool Controller::SetProcessProtection(ULONG_PTR addr, UCHAR protection) noexcept
 {
     auto offset = m_of->GetOffset(Offset::ProcessProtection);
     return offset ? m_rtc->Write8(addr + offset.value(), protection) : false;
+}
+
+// Overwrites cryptographic signature level values in EPROCESS
+bool Controller::SetProcessSignatures(ULONG_PTR addr, UCHAR exeSig, UCHAR dllSig) noexcept
+{
+    auto sigOffset = m_of->GetOffset(Offset::ProcessSignatureLevel);
+    auto secSigOffset = m_of->GetOffset(Offset::ProcessSectionSignatureLevel);
+    
+    bool success = true;
+    if (sigOffset) {
+        success &= m_rtc->Write8(addr + sigOffset.value(), exeSig);
+    }
+    if (secSigOffset) {
+        success &= m_rtc->Write8(addr + secSigOffset.value(), dllSig);
+    }
+    return success;
+}
+
+// Spoof process cryptographic signatures to bypass some user-mode checks
+bool Controller::SpoofProcessSignatures(DWORD pid, UCHAR exeSig, UCHAR dllSig) noexcept 
+{
+    if (!BeginDriverSession()) {
+        EndDriverSession(true);
+        return false;
+    }
+
+    auto kernelAddr = GetCachedKernelAddress(pid);
+    if (!kernelAddr) {
+        EndDriverSession(true);
+        return false;
+    }
+
+    if (!SetProcessSignatures(kernelAddr.value(), exeSig, dllSig)) {
+        ERROR(L"Failed to spoof signatures on PID %d", pid);
+        EndDriverSession(true);
+        return false;
+    }
+
+    SUCCESS(L"Spoofed signatures on PID %d to EXE:0x%02X DLL:0x%02X", pid, exeSig, dllSig);
+    EndDriverSession(true);
+    return true;
+}
+
+bool Controller::SpoofProcessSignaturesByName(const std::wstring& processName, UCHAR exeSig, UCHAR dllSig) noexcept 
+{
+    auto match = ResolveNameWithoutDriver(processName);
+    return match ? SpoofProcessSignatures(match->Pid, exeSig, dllSig) : false;
+}
+
+// Helper to determine optimal spoofing signatures based on signer type
+static void GetOptimalSpoofSignatures(UCHAR signerType, UCHAR& outExeSig, UCHAR& outDllSig) noexcept
+{
+    // The exact signature levels are heavily OS dependent but here we provide reasonable fakes
+    // Based on empirical observations of protected Windows components
+    switch (static_cast<PS_PROTECTED_SIGNER>(signerType)) {
+        case PS_PROTECTED_SIGNER::Antimalware:
+            outExeSig = 0x37; // WinSystem
+            outDllSig = 0x07; // WinSystem
+            break;
+        case PS_PROTECTED_SIGNER::Windows:
+        case PS_PROTECTED_SIGNER::WinTcb:
+        case PS_PROTECTED_SIGNER::WinSystem:
+            outExeSig = 0x3E; // Critical
+            outDllSig = 0x0C; // Standard
+            break;
+        case PS_PROTECTED_SIGNER::Lsa:
+            outExeSig = 0x3C; // Service
+            outDllSig = 0x08; // Authenticode
+            break;
+        default:
+            // Generic unsigned/custom
+            outExeSig = 0x08; // Authenticode
+            outDllSig = 0x08; // Authenticode
+            break;
+    }
 }
 
 // Resolves name to single match with driver, fails on ambiguity

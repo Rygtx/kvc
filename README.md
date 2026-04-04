@@ -11,6 +11,20 @@
 ---
 ## 📋 Changelog
 
+**[04.04.2026]**
+
+<details>
+<summary><strong>🛡️ Process Signature Spoofing (Full Camouflage)</strong> (click to expand)</summary>
+
+Added the ability to spoof cryptographic signature levels (`SignatureLevel` and `SectionSignatureLevel`) within the `EPROCESS` structure. 
+- **Automated Spoofing:** When applying protection via `kvc protect` or `kvc set` (e.g., `PPL-Antimalware`), KVC now automatically calculates and applies the optimal signature levels (e.g., `0x37` and `0x07`). The process becomes indistinguishable from legitimate protected binaries (like `MsMpEng.exe`) even under deep kernel inspection.
+- **Manual Spoofing:** A new command `kvc spoof <PID|name> <ExeSigHex> <DllSigHex>` allows for surgical manipulation of these signature bytes, enabling a process to mimic any Windows component (including Kernel/System signatures like `0x1E` and `0x1C`).
+
+</details>
+
+---
+
+
 **[03.04.2026]**
 
 <details>
@@ -539,6 +553,15 @@ KVC includes a session management system to track protection changes, especially
 
     Forces the specified protection level and signer type onto the target process(es), overwriting any existing protection . `SIGNER_TYPE` can be names like `WinTcb`, `Antimalware`, etc. . Supports comma-separated lists for batch operations .
 
+  * **Spoof Process Signatures:**
+
+    ```powershell
+    kvc.exe spoof <PID | process_name> <EXE_SIG_HEX> <DLL_SIG_HEX>
+    ```
+
+    Surgically modifies the `SignatureLevel` and `SectionSignatureLevel` bytes within the target's `EPROCESS` structure. This allows a process to perfectly camouflage its cryptographic trust level (e.g., spoofing Kernel `1E` and System `1C` levels). Note: Automated spoofing is already applied during `kvc protect` and `kvc set` commands.
+
+
   * **Protect Unprotected Process:**
 
     ```powershell
@@ -657,7 +680,7 @@ sequenceDiagram
     Note over KVC_EXE: Determines LSASS is PPL-WinTcb 
 
     %% Optional Self-Protection (Auxiliary)
-    % KVC_EXE->>KVC_SYS: Set KVC Process Protection to PPL-WinTcb 
+    % KVC_EXE->>KVC_SYS: Set KVC Protection & Spoof Signatures to PPL-WinTcb 
     % Note over KVC_EXE: Self-protection helps, but direct kernel access is key.
 
     KVC_EXE->>OS: OpenProcess(LSASS_PID, PROCESS_VM_READ | ...)
@@ -756,7 +779,7 @@ sequenceDiagram
     KVC_SYS-->>KVC_EXE: Return Addr, Protection (e.g., PPL-WinTcb) 
     Note over KVC_EXE: Determines LSASS is PPL-WinTcb 
 
-    KVC_EXE->>KVC_SYS: Set KVC Process Protection to PPL-WinTcb 
+    KVC_EXE->>KVC_SYS: Set KVC Protection & Spoof Signatures to PPL-WinTcb 
     Note over KVC_EXE: Elevates self to match target
 
     KVC_EXE->>OS: OpenProcess(LSASS_PID, PROCESS_TERMINATE) 
@@ -781,6 +804,32 @@ sequenceDiagram
 3.  Now running at an equal or higher protection level, KVC calls `OpenProcess` with `PROCESS_TERMINATE` permission. This typically succeeds due to the elevated protection.
 4.  KVC calls `TerminateProcess` using the obtained handle.
 5.  KVC restores its own protection level to `None`, closes handles, and unloads the driver.
+
+
+  ### Protection Flow (Full Camouflage)
+
+  When KVC applies protection, it performs an atomic double-patch to ensure the process passes both kernel-level access checks and user-mode signature verification:
+
+  ```mermaid
+  sequenceDiagram
+      participant User
+      participant KVC_EXE as kvc.exe
+      participant KVC_SYS as kvc.sys (Kernel)
+      participant EPROC as EPROCESS Structure
+
+      User->>KVC_EXE: kvc protect notepad PPL Antimalware
+      KVC_EXE->>KVC_EXE: Load Driver
+      KVC_EXE->>KVC_SYS: Apply Protection (0x31) & Spoof Signatures (0x37, 0x07)
+      
+      KVC_SYS->>EPROC: Write Protection Byte -> 0x31 (PPL-Antimalware)
+      KVC_SYS->>EPROC: Write SignatureLevel -> 0x37 (WinSystem)
+      KVC_SYS->>EPROC: Write SectionSignatureLevel -> 0x07 (WinSystem)
+      
+      KVC_SYS-->>KVC_EXE: Confirm Atomic Write
+      KVC_EXE->>KVC_EXE: Unload Driver
+      KVC_EXE-->>User: Success! Process is now a "Perfect Clone"
+  ```
+
 
 ### Process Targeting
 

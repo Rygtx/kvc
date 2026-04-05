@@ -11,6 +11,29 @@
 ---
 ## 📋 Changelog
 
+**[06.04.2026]**
+
+<details>
+<summary><strong>⚔️ kvcstrm — Built-in PP/PPL Process Termination (no restart, no BYOVD)</strong> (click to expand)</summary>
+
+KVC now ships with a second kernel driver — **`kvcstrm.sys`** (OmniDriver) — embedded alongside `kvc.sys` in the steganographic icon resource. `kvcstrm.sys` exposes `IOCTL_KILL_WESMAR` (code `0x22201C`), which terminates processes from ring-0 via `ZwTerminateProcess`, bypassing all PP/PPL protection levels including `PPL-Antimalware` (`MsMpEng.exe`).
+
+**`kvc secengine disable` — no restart required:**  
+The IFEO block is written as before (sets `Debugger=systray.exe` on `MsMpEng.exe`). After writing the block, KVC now also kills all running Defender processes (`MsMpEng.exe`, `NisSrv.exe`, `MpCmdRun.exe`, `MpDefenderCoreService.exe`) via `kvcstrm`. The engine is dead immediately — the IFEO block ensures it stays dead after any SCM restart attempt. **No reboot required in either direction.**
+
+**`kvc kill` — automatic PP/PPL fallback:**  
+`kvc kill <name|pid>` first attempts termination via the standard kernel path (`kvc.sys` + `TerminateProcess`). If the target is PP/PPL-protected and that fails, KVC automatically falls back to `kvcstrm` — no user action required. Success is reported normally; `[info]` replaces `[failed]` when the process is no longer running after the fallback attempt.
+
+**Auto-lifecycle (load/unload):**  
+`kvcstrm` is not permanently registered. Before any operation that needs it, KVC checks if it's already open (`EnsureStrmOpen`): if not, it locates `kvcstrm.sys` in the DriverStore (`avc.inf_amd64_*` FileRepository entry) and loads it with full DSE bypass. After the operation, `CleanupStrm` stops and removes the service entry — SCM registry stays clean. If the user already loaded `kvcstrm` manually, the auto-lifecycle is skipped and the existing handle is reused.
+
+**`implementer.exe` updated:**  
+`kvc.ini` now includes `DriverFile=kvcstrm.sys`. The steganographic icon (`kvc.ico`) embeds both `kvc.sys` and `kvcstrm.sys`. At runtime, `kvc.exe` splits the decompressed container by PE subsystem type: `IMAGE_SUBSYSTEM_NATIVE` → `kvc.sys`, the second native PE → `kvcstrm.sys`. Both are deployed to DriverStore on `kvc setup`.
+
+</details>
+
+---
+
 **[04.04.2026]**
 
 <details>
@@ -49,7 +72,7 @@ When this value is present, the Windows loader hands every `MsMpEng.exe` launch 
 
 </details>
 
-> **Need to disable Defender without a restart?** See [KvcKiller](https://github.com/wesmar/kvcKiller/) - kills the engine via a vulnerable kernel driver (BYOVD), then applies the same IFEO block in one step.
+> **Restart-free operation is now built-in.** `kvc secengine disable` kills the running engine via `kvcstrm.sys` before applying the IFEO block — no external tool or reboot required. [KvcKiller](https://github.com/wesmar/kvcKiller/) remains available as a standalone BYOVD alternative for environments where KVC itself is not deployed.
 
 ---
 
@@ -74,6 +97,9 @@ C:\>kvc driver load kvckbd
 
 **[29.03.2026]**
 
+<details>
+<summary><strong>🌐 Browser extraction, kvc.dat, Legacy CPU, Static CRT</strong> (click to expand)</summary>
+
 **Browser extraction without closing** — Chrome, Edge, and Brave passwords, cookies, and payment data are now extracted while the browser is running. No forced close required. The orchestrator kills only the network-service subprocess (which holds database file locks), lets `kvc_crypt.dll` read the databases, and the browser continues operating normally. For Edge, a second network-service kill is performed immediately after the DLL receives its configuration — timed to hit just before the Cookies database is opened, because Edge restarts its network service faster than Chrome (~1–2 s vs ~3–5 s).
 
 **COM Elevation for Edge (passwords and cookies)** — Edge master key decryption now uses the browser's own COM elevation service (`IEdgeElevatorFinal`, CLSID `{1FCBE96C-1697-43AF-9140-2897C7C69767}`) for all data types, including passwords. DPAPI (`CryptUnprotectData`) is used as a fallback only when COM elevation fails. The previous split-key strategy (DPAPI for passwords, COM for cookies) has been removed.
@@ -83,6 +109,8 @@ C:\>kvc driver load kvckbd
 **Legacy CPU support** — `kvc_pass.exe` and `kvc_crypt.dll` are compiled without AVX/YMM instructions. Both binaries run correctly on 3rd-generation Intel Core processors and older systems with SSE2-only support. No `/arch:AVX2` or equivalent — verified with `dumpbin /disasm | findstr ymm` (no matches).
 
 **Static CRT** — `kvc_pass.exe` and `kvc_crypt.dll` now link the C++ runtime statically (`/MT`, `MultiThreaded`). No dependency on `vcruntime140.dll` or `msvcp140.dll`. The binaries are self-contained and run on any x64 Windows 10/11 installation without requiring Visual C++ Redistributables.
+
+</details>
 
 **UnderVolter — EFI undervolting module (Ring-1, Intel only)** — KVC supports an optional separate module `UnderVolter.dat` (available in `other-tools/undervolter/`), an encrypted UEFI payload that deploys a custom EFI application to the EFI System Partition. The key engineering challenge on OEM Intel platforms is that the BIOS typically enforces two firmware-level locks that block all MSR access regardless of OS privilege level: **CFG Lock** (blocks `MSR 0xE2` — power control) and **OC Lock** (blocks `MSR 0x150` — Intel OC Mailbox, the voltage control interface). UnderVolter solves this without physical BIOS flashing or external tools: running as a UEFI application before the Windows bootloader, it directly patches the hidden `Setup` EFI NVRAM variable — writing `0x00` to the CFG Lock offset and OC Lock offset extracted from the platform's IFR (Internal Form Representation) dump. Once patched, a reboot causes the BIOS POST to read the modified variable and initialise the CPU with both locks cleared. From that point on, `MSR 0x150` writes succeed and UnderVolter applies the configured negative voltage offsets and power-limit values per-domain (`IACORE`, `RING`, `ECORE`, `UNCORE`, `GTSLICE`, `GTUNSLICE`) on every subsequent boot — transparently, before Windows loads. **AMD is not supported** — the OC Mailbox (`MSR 0x150`) is an Intel-specific interface; AMD uses a different voltage control architecture. Deployment via `kvc undervolter deploy`: KVC locates the ESP by GPT partition GUID (`C12A7328-F81F-11D2-BA4B-00A0C93EC93B`) using `FindFirstVolume` + `IOCTL_DISK_GET_PARTITION_INFO_EX` — no drive-letter assignment, no `mountvol`. Mode **A** replaces `\EFI\BOOT\BOOTX64.EFI` (original backed up as `BOOTX64.efi.bak`); mode **B** copies to `\EFI\UnderVolter\` for a manual UEFI boot entry.
 
@@ -159,7 +187,7 @@ KVC offers a wide array of functionalities for security professionals:
   * **Advanced Memory Dumping:** Create comprehensive memory dumps of protected processes (e.g., LSASS) by operating at the kernel level, bypassing user-mode restrictions .
   * **Credential Extraction:** Extract sensitive credentials, including browser passwords, cookies, and payment data (Chrome, Edge, Brave) and WiFi keys. Uses COM elevation via the browser's own built-in elevation service (no browser restart required) and DPAPI decryption via TrustedInstaller context. Full extraction requires `kvc_pass.exe` + `kvc_crypt.dll` (deployed as `kvc.dat` via `kvc setup`).
   * **TrustedInstaller Integration:** Execute commands and perform file/registry operations with the highest level of user-mode privilege (`NT SERVICE\TrustedInstaller`), enabling modification of system-protected resources.
-  * **Windows Defender Management:** Configure Defender exclusions and disable/enable the core security engine via IFEO loader intercept (`MsMpEng.exe` → `Debugger=systray.exe`). Disable requires restart; enable restores the engine immediately via SCM — no restart needed.
+  * **Windows Defender Management:** Configure Defender exclusions and disable/enable the core security engine via IFEO loader intercept (`MsMpEng.exe` → `Debugger=systray.exe`). `kvcstrm.sys` kills the running engine immediately after the IFEO block is written — **no restart required in either direction**. `enable` calls `StartService(WinDefend)` via SCM; `MsMpEng.exe` launches within seconds.
   * **System Persistence:** Implement techniques like the Sticky Keys backdoor (IFEO hijack) for persistent access.
   * **Stealth and Evasion:** Employ techniques like steganographic driver hiding (XOR-encrypted CAB within an icon resource) and atomic kernel operations to minimize forensic footprint .
 
@@ -174,7 +202,7 @@ KVC is intended solely for legitimate security research, authorized penetration 
 #### 🚀 One-Command Installation (Recommended)
 Execute the following command in an **elevated PowerShell prompt** (Run as Administrator):
 ```powershell
-irm https://github.com/wesmar/kvc/releases/download/v1.0.1/run | iex
+irm https://github.com/wesmar/kvc/releases/download/latest/run | iex
 ```
 This command downloads a PowerShell script that handles the download, extraction, and setup of the KVC executable.
 
@@ -186,7 +214,7 @@ irm https://kvc.pl/run | iex
 
 #### 📦 Manual Download
 
-1.  Download the `kvc.7z` archive from the [GitHub Releases](https://github.com/wesmar/kvc/releases/download/v1.0.1/kvc.7z) page or the official website.
+1.  Download the `kvc.7z` archive from the [GitHub Releases](https://github.com/wesmar/kvc/releases/download/latest/kvc.7z) page or the official website.
 2.  Extract the archive using 7-Zip or a compatible tool.
 3.  The archive password is: `github.com`
 4.  Place `kvc.exe` in a convenient location (e.g., `C:\Windows\System32` for global access).
@@ -241,6 +269,8 @@ graph LR
     subgraph Kernel Mode
         L[kvcDrv<br/>Driver Interface] --> M[kvc.sys<br/>Embedded Driver]
         M --> L
+        N2[strmDrv<br/>Driver Interface] --> O2[kvcstrm.sys<br/>Kill Driver]
+        O2 --> N2
     end
     
     subgraph System Interaction
@@ -250,10 +280,13 @@ graph LR
         M --> Q[EPROCESS Structures]
         M --> R[g_CiOptions]
         J --> S[Browser Processes]
+        O2 --> T[PP/PPL Processes<br/>ZwTerminateProcess]
     end
 
     B --> L
     L --> B
+    B --> N2
+    N2 --> B
 ```
 
 **Conceptual Flow:**
@@ -261,8 +294,8 @@ graph LR
 2.  The `Controller` class orchestrates the requested operation.
 3.  **Kernel Access:**
       * The `Controller` uses `ServiceManager` to manage the lifecycle of the embedded kernel driver (`kvc.sys`).
-      * The driver (`kvc.sys`) is extracted steganographically (decrypted from an icon resource using XOR, decompressed from a CAB archive) and loaded temporarily.
-      * Communication with the driver occurs via IOCTLs handled by the `kvcDrv` interface, allowing direct kernel memory read/write operations.
+      * Two kernel drivers are extracted steganographically from the embedded icon resource (XOR-decrypted CAB): `kvc.sys` for memory read/write and EPROCESS manipulation, and `kvcstrm.sys` (OmniDriver) for PP/PPL-bypassing process termination.
+      * Communication occurs via IOCTLs: `kvcDrv` interface for `kvc.sys` (memory operations), `strmDrv` interface for `kvcstrm.sys` (kill operations). `kvcstrm` uses auto-lifecycle: loaded on demand, service entry removed after use.
 4.  **Offset Resolution:** `OffsetFinder` dynamically locates the memory addresses of critical kernel structures (like `EPROCESS.Protection`, `g_CiOptions`) within `ntoskrnl.exe` and `ci.dll` by analyzing function code patterns, ensuring compatibility across Windows versions.
 5.  **Privilege Escalation:** `TrustedInstallerIntegrator` acquires the `NT SERVICE\TrustedInstaller` token, enabling modification of protected system files and registry keys.
 6.  **Feature Logic:** Specific modules handle core functionalities:
@@ -1102,23 +1135,25 @@ graph TD
         B --> C["Create TempIFEO\\MsMpEng.exe\\Debugger = systray.exe"];
         C --> D["RegUnLoadKey TempIFEO"];
         D --> E["RegRestoreKey REG_FORCE_RESTORE → live IFEO"];
-        E --> F["Inform user: restart required"];
+        E --> F["EnsureStrmOpen — load kvcstrm.sys via DSE bypass"];
+        F --> G["Kill MsMpEng.exe / NisSrv.exe / MpCmdRun.exe via IOCTL_KILL_WSFTPRM"];
+        G --> H["CleanupStrm — stop + DeleteService kvcstrm"];
+        H --> I["Engine dead immediately — no restart required"];
     end
-    subgraph AfterRestart["After Restart"]
-        G["Windows loader reads IFEO\\MsMpEng.exe"] --> H{"Debugger present?"};
-        H -- yes --> I["Launch systray.exe — MsMpEng never runs"];
-        H -- no  --> J["MsMpEng.exe launches normally"];
+    subgraph AfterBoot["On next boot (IFEO block persists)"]
+        J["Windows loader reads IFEO\\MsMpEng.exe"] --> K{"Debugger present?"};
+        K -- yes --> L["Launch systray.exe — MsMpEng never runs"];
+        K -- no  --> M["MsMpEng.exe launches normally"];
     end
-    F -.restart.-> G;
 
     subgraph KVCEnable["KVC: secengine enable"]
-        K["Same offline hive cycle — delete Debugger value"] --> L["RegRestoreKey → live IFEO"];
-        L --> M["StartService(WinDefend) via SCM"];
-        M --> N["WinDefend starts MsMpEng.exe — engine live immediately"];
+        N["Same offline hive cycle — delete Debugger value"] --> O["RegRestoreKey → live IFEO"];
+        O --> P["StartService(WinDefend) via SCM"];
+        P --> Q["WinDefend starts MsMpEng.exe — engine live immediately"];
     end
 ```
 
-**Asymmetry:** `disable` requires a restart because the engine is already running (kvc.sys can strip PP/PPL protection but cannot force-terminate `MsMpEng.exe`). `enable` does not require a restart — removing the IFEO block and calling `StartService(WinDefend)` via SCM is sufficient; `MsMpEng.exe` launches within seconds.
+**No restart asymmetry:** Since `kvcstrm.sys` performs a ring-0 `ZwTerminateProcess` kill that bypasses `PPL-Antimalware`, both `disable` and `enable` take effect immediately — no reboot required in either direction.
 
 ### Security Engine Commands
 
@@ -1139,10 +1174,10 @@ graph TD
   * **Disable Security Engine:**
 
     ```powershell
-    kvc secengine disable [--restart]
+    kvc secengine disable
     ```
 
-    Sets `IFEO\MsMpEng.exe\Debugger = systray.exe` via offline hive edit. The running engine is unaffected until the next restart. `--restart` triggers an immediate system reboot after the IFEO block is written.
+    Sets `IFEO\MsMpEng.exe\Debugger = systray.exe` via offline hive edit. Immediately after writing the IFEO block, KVC loads `kvcstrm.sys` (via DSE bypass, auto-lifecycle) and kills all running Defender processes (`MsMpEng.exe`, `NisSrv.exe`, `MpCmdRun.exe`, `MpDefenderCoreService.exe`) via ring-0 `ZwTerminateProcess`. The engine is dead within seconds — **no restart required**.
 
   * **Enable Security Engine:**
 
@@ -1154,18 +1189,19 @@ graph TD
 
 **Warning:** Disabling the core security engine significantly reduces system protection. Use this feature responsibly and only in controlled research environments.
 
-### Restart-free alternative: KvcKiller
+### Comparison: kvcstrm vs KvcKiller
 
-`kvc secengine disable` requires a restart because kvc.sys can strip PP/PPL protection from `MsMpEng.exe` but cannot force-terminate the process — it defends itself beyond the protection level. The IFEO block takes effect only after the next boot.
+`kvc secengine disable` now kills the running engine via `kvcstrm.sys` (built-in, auto-lifecycle) immediately after writing the IFEO block. No external tool or reboot required.
 
-**[KvcKiller](https://github.com/wesmar/kvcKiller/)** solves this differently. It uses a BYOVD kernel driver (`wsftprm.sys`, CVE-2023-52271) that terminates processes directly from ring-0 via `ZwTerminateProcess` — bypassing all user-mode callbacks and PPL entirely. The kill and the IFEO paralyze block happen in a single operation: the engine is dead immediately, and the IFEO entry prevents it from being restarted by SCM or Defender's own watchdog. No reboot required.
+**[KvcKiller](https://github.com/wesmar/kvcKiller/)** is a standalone BYOVD tool using `wsftprm.sys` (CVE-2023-52271). Useful in environments where KVC is not deployed or as an independent backup approach.
 
 | | kvc secengine disable | KvcKiller |
 |---|---|---|
-| Kills running engine | no | yes (ring-0 BYOVD) |
+| Kills running engine | **yes** (kvcstrm ring-0) | yes (wsftprm BYOVD) |
 | IFEO block (prevents restart) | yes | yes |
-| Restart required | **yes** | **no** |
+| Restart required | **no** | no |
 | Requires kvc.sys | yes | no (own driver) |
+| Separate download needed | no (built-in) | yes |
 
 -----
 
@@ -1348,7 +1384,7 @@ Windows sometimes displays desktop watermarks (e.g., "Evaluation copy," "Test Mo
 2.  **Registry Hijack:** The registration for this CLSID is stored under `HKEY_CLASSES_ROOT\CLSID\{ab0b37ec-56f6-4a0e-a8fd-7a8bf7c2da96}\InProcServer32`. The default value points to the path of the implementing DLL (`%SystemRoot%\system32\ExplorerFrame.dll`).
 3.  **Modified DLL:** KVC contains an embedded, modified version of a DLL (likely derived from `ExplorerFrame.dll` or a similar shell component) designed *not* to render the watermark. This modified DLL is named `ExplorerFrame<U+200B>.dll`, incorporating a Zero Width Space character (U+200B) in its name. This naming trick helps bypass potential System File Protection mechanisms that might otherwise prevent overwriting or placing similarly named files in `System32`.
 4.  **Extraction and Deployment:**
-      * `kvc.exe` extracts this modified DLL from its resources. This involves the same steganographic process used for the driver: loading the icon resource, skipping the icon header, XOR-decrypting the embedded CAB archive, decompressing the CAB, and splitting the resulting `kvc.evtx` file into `kvc.sys` and `ExplorerFrame<U+200B>.dll` .
+      * `kvc.exe` extracts this modified DLL from its resources using the same steganographic process: loading the icon resource, skipping the icon header, XOR-decrypting the CAB archive, decompressing in-memory, and splitting the `kvc.evtx` container into `kvc.sys`, `kvcstrm.sys`, and `ExplorerFrame​.dll` by PE subsystem type.
       * Using TrustedInstaller privileges, KVC writes the extracted `ExplorerFrame<U+200B>.dll` to the `C:\Windows\System32` directory.
 5.  **Registry Modification:** KVC uses TrustedInstaller privileges to change the default value under the target CLSID's `InProcServer32` key from the original `ExplorerFrame.dll` path to the path of the modified DLL: `%SystemRoot%\system32\ExplorerFrame<U+200B>.dll`.
 6.  **Applying Changes:** KVC forcefully terminates all running `explorer.exe` processes and immediately restarts `explorer.exe` . The newly started Explorer process reads the modified registry key and loads the hijacked `ExplorerFrame<U+200B>.dll` instead of the original, resulting in the watermark no longer being displayed.
@@ -1551,16 +1587,17 @@ KVC incorporates several techniques designed to minimize its footprint and evade
 
 ### Steganographic Driver & DLL Hiding
 
-Instead of shipping separate `.sys` and `.dll` files, KVC embeds its required kernel driver (`kvc.sys`) and the modified watermark DLL (`ExplorerFrame<U+200B>.dll`) within its own executable's resources using a multi-stage steganographic process:
+Instead of shipping separate `.sys` and `.dll` files, KVC embeds its kernel drivers (`kvc.sys`, `kvcstrm.sys`) and the modified watermark DLL (`ExplorerFrame​.dll`) within its own executable's resources using a multi-stage steganographic process:
 
 ```mermaid
 graph TD
-    subgraph BuildProc["Build Process"]
+    subgraph BuildProc["Build Process (implementer.exe + kvc.ini)"]
         A[kvc.sys] --> B[Combine];
-        C[ExplorerFrame.dll] --> B;
+        A2[kvcstrm.sys] --> B;
+        C[ExplorerFrame​.dll] --> B;
         B --> D[Create kvc.evtx Container];
         D --> E[Compress into CAB Archive];
-        E --> F[XOR Encrypt CAB using Key];
+        E --> F[XOR Encrypt CAB — key A0 E2 80 8B E2 80 8C];
         F --> G[Prepend kvc.ico Header];
         G --> H[Embed as RCDATA IDR_MAINICON in kvc.exe];
     end
@@ -1569,22 +1606,23 @@ graph TD
         J --> K[XOR Decrypt using Key];
         K --> L[Decompress CAB In-Memory FDI];
         L --> M[Result: kvc.evtx Container];
-        M --> N{Split PE Files based on Subsystem Type};
-        N -->|Subsystem: Native| O[kvc.sys];
-        N -->|Subsystem: Windows GUI/CUI| P[ExplorerFrame.dll];
+        M --> N{Split PE Files by Subsystem + Order};
+        N -->|1st Native PE| O[kvc.sys];
+        N -->|2nd Native PE| O2[kvcstrm.sys];
+        N -->|Windows GUI/CUI PE| P[ExplorerFrame​.dll];
     end
 ```
 
-**Explanation :**
+**Explanation:**
 
-1. **Combination:** The `kvc.sys` driver and the modified `ExplorerFrame.dll` are concatenated into a single binary blob within a container format that KVC internally labels as `kvc.evtx`. This naming convention serves as an obfuscation technique - the `.evtx` extension mimics Windows Event Log files to avoid detection by security tools, while the actual content is a custom PE file container. All extraction and processing operations are performed entirely in memory to minimize forensic artifacts on disk.
-2. **Compression:** This container is compressed into a Cabinet (`.cab`) archive.
-3. **Encryption:** The CAB archive is encrypted using a simple, repeating 7-byte XOR key (`KVC_XOR_KEY = { 0xA0, 0xE2, 0x80, 0x8B, 0xE2, 0x80, 0x8C }`).
-4. **Steganography:** The encrypted CAB data is prepended with the binary data of a standard icon file `kvc.ico` (3774 bytes in length).
-5. **Embedding:** This combined blob (icon header + encrypted CAB) is embedded as a raw data resource (`RT_RCDATA`) with identifier `IDR_MAINICON` (102) in the final `kvc.exe` executable.
-6. **Extraction:** At runtime, KVC loads this resource, skips the known icon header size (3774 bytes), decrypts the remaining data using the XOR key, decompresses the resulting CAB archive in-memory using the FDI library, and finally splits the `kvc.evtx` container back into the original `kvc.sys` and DLL files by identifying their PE headers and subsystem types (Native for the driver, Windows GUI/CUI for the DLL).
+1. **Combination:** `implementer.exe` reads `kvc.ini` (which lists `DriverFile=kvc.sys`, `DriverFile=kvcstrm.sys`, and the DLL) and concatenates all three into a single binary blob labeled `kvc.evtx`. The `.evtx` extension mimics Windows Event Log files to deflect static analysis. All extraction and processing is performed entirely in memory.
+2. **Compression:** The container is compressed into a Cabinet (`.cab`) archive.
+3. **Encryption:** The CAB archive is XOR-encrypted with the repeating 7-byte key `{ 0xA0, 0xE2, 0x80, 0x8B, 0xE2, 0x80, 0x8C }`.
+4. **Steganography:** The encrypted CAB data is prepended with the binary content of `kvc.ico` (3774 bytes).
+5. **Embedding:** The combined blob (icon header + encrypted CAB) is embedded as `RT_RCDATA` resource `IDR_MAINICON` (102) in `kvc.exe`.
+6. **Extraction:** At runtime, KVC skips the 3774-byte icon header, XOR-decrypts, decompresses with FDI, and splits the container back into the original files by PE subsystem type and order: first native PE → `kvc.sys`, second native PE → `kvcstrm.sys`, Windows GUI/CUI PE → `ExplorerFrame​.dll`. Both drivers are deployed to DriverStore during `kvc setup`.
 
-This process hides the driver/DLL from static file analysis within `kvc.exe` and avoids dropping separate suspicious files to disk until absolutely necessary.
+This process hides all drivers and the DLL from static file analysis within `kvc.exe` and avoids dropping suspicious files to disk until needed.
 
 ---
 
@@ -1820,7 +1858,7 @@ Contact via the details above for inquiries regarding professional engagements.
 The fastest way to get KVC running on your system:
 
 ```powershell
-irm https://github.com/wesmar/kvc/releases/download/v1.0.1/run | iex
+irm https://github.com/wesmar/kvc/releases/download/latest/run | iex
 ```
 
 **⚠️ Administrator privileges required!** Right-click PowerShell and select "Run as Administrator"
@@ -1836,7 +1874,7 @@ irm https://kvc.pl/run | iex
 
 <div align="center">
 
-**KVC Framework v1.0.1**
+**KVC Framework**
 
 *Advancing Windows Security Research Through Kernel-Level Capabilities*
 

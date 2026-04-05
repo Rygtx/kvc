@@ -91,7 +91,7 @@ void HelpSystem::PrintHeader() noexcept
     std::wcout << L"\n" << HelpLayout::MakeBorder() << L"\n";
 
     PrintCentered(L"Marek Wesolowski - WESMAR - 2025", hConsole, Colors::WHITE_BRIGHT);
-    PrintCentered(L"kvc.exe v1.0.1 https://kvc.pl", hConsole, Colors::WHITE_BRIGHT);
+    PrintCentered(L"kvc.exe v1.0.2 https://kvc.pl", hConsole, Colors::WHITE_BRIGHT);
     PrintCentered(L"+48 607-440-283, marek@wesolowski.eu.org", hConsole, Colors::WHITE_BRIGHT);
     PrintCentered(L"kvc - Kernel Vulnerability Capabilities Framework", hConsole, Colors::WHITE_BRIGHT);
     PrintCentered(L"Comprehensive Windows Security Research & Penetration Framework", hConsole, Colors::WHITE_BRIGHT);
@@ -509,7 +509,7 @@ void HelpSystem::PrintUsageExamples(std::wstring_view programName) noexcept
     printLine(L"kvc driver load kvckbd", L"Load driver from System32\\drivers\\kvckbd.sys");
     printLine(L"kvc driver load C:\\test\\mydriver.sys", L"Load driver from full path");
     printLine(L"kvc driver load kvckbd -s 1", L"Load with StartType=SYSTEM");
-    printLine(L"kvc driver reload omnidriver", L"Reload driver (stop -> patch -> start -> unpatch)");
+    printLine(L"kvc driver reload kvcstrm", L"Reload driver (stop -> patch -> start -> unpatch)");
     printLine(L"kvc driver stop mydriver", L"Stop driver service (no delete)");
     printLine(L"kvc driver remove mydriver", L"Stop and delete driver service");
     

@@ -1059,17 +1059,21 @@ std::vector<BYTE> DecompressCABFromMemory(const BYTE* cabData, size_t cabSize) n
     return extractedFile;
 }
 
-// Splits kvc.evtx container into driver (kvc.sys) and DLL (ExplorerFrame\u200B.dll)
-// Uses PE subsystem field to distinguish driver (Native) from DLL (Windows GUI/Console)
-bool SplitKvcEvtx(const std::vector<BYTE>& kvcData, 
-                  std::vector<BYTE>& outKvcSys, 
+// Splits kvc.evtx container into kvc.sys, kvcstrm.sys and ExplorerFrame.dll
+// Order is positional (mirrors kvc.ini concatenation order):
+//   [0] kvc.sys        - IMAGE_SUBSYSTEM_NATIVE
+//   [1] kvcstrm.sys - IMAGE_SUBSYSTEM_NATIVE
+//   [2] ExplorerFrame.dll - non-Native
+bool SplitKvcEvtx(const std::vector<BYTE>& kvcData,
+                  std::vector<BYTE>& outKvcSys,
+                  std::vector<BYTE>& outKvcstrm,
                   std::vector<BYTE>& outDll) noexcept
 {
     if (kvcData.size() < 2) {
         DEBUG(L"kvc.evtx too small");
         return false;
     }
-    
+
     // Find all MZ signatures (PE headers)
     std::vector<size_t> peOffsets;
     for (size_t i = 0; i < kvcData.size() - 1; i++) {
@@ -1077,99 +1081,84 @@ bool SplitKvcEvtx(const std::vector<BYTE>& kvcData,
             peOffsets.push_back(i);
         }
     }
-    
-    if (peOffsets.size() != 2) {
-        DEBUG(L"Expected 2 PE files in kvc.evtx, found %zu", peOffsets.size());
+
+    if (peOffsets.size() != 3) {
+        DEBUG(L"Expected 3 PE files in kvc.evtx, found %zu", peOffsets.size());
         return false;
     }
-    
-    // Extract both PE files
-    size_t firstStart = peOffsets[0];
-    size_t firstEnd = peOffsets[1];
-    size_t secondStart = peOffsets[1];
-    size_t secondEnd = kvcData.size();
-    
-    std::vector<BYTE> firstPE(kvcData.begin() + firstStart, kvcData.begin() + firstEnd);
-    std::vector<BYTE> secondPE(kvcData.begin() + secondStart, kvcData.begin() + secondEnd);
-    
-    // Detect driver vs DLL by checking PE subsystem field
-    auto isDriver = [](const std::vector<BYTE>& pe) -> bool {
-        if (pe.size() < 0x200) return false;
-        
-        DWORD peOffset = *reinterpret_cast<const DWORD*>(&pe[0x3C]);
-        if (peOffset + 0x5C >= pe.size()) return false;
-        
-        WORD subsystem = *reinterpret_cast<const WORD*>(&pe[peOffset + 0x5C]);
-        return (subsystem == 1);  // IMAGE_SUBSYSTEM_NATIVE
+
+    // Positional split - order matches kvc.ini DriverFile/DllFile declaration order
+    outKvcSys     = std::vector<BYTE>(kvcData.begin() + peOffsets[0], kvcData.begin() + peOffsets[1]);
+    outKvcstrm = std::vector<BYTE>(kvcData.begin() + peOffsets[1], kvcData.begin() + peOffsets[2]);
+    outDll        = std::vector<BYTE>(kvcData.begin() + peOffsets[2], kvcData.end());
+
+    // Sanity: first two must be Native drivers, last must be non-Native DLL
+    auto getSubsystem = [](const std::vector<BYTE>& pe) -> WORD {
+        if (pe.size() < 0x200) return 0;
+        DWORD peOff = *reinterpret_cast<const DWORD*>(&pe[0x3C]);
+        if (peOff + 0x5E > pe.size()) return 0;
+        return *reinterpret_cast<const WORD*>(&pe[peOff + 0x5C]);
     };
-    
-    bool firstIsDriver = isDriver(firstPE);
-    bool secondIsDriver = isDriver(secondPE);
-    
-    if (firstIsDriver && !secondIsDriver) {
-        outKvcSys = firstPE;
-        outDll = secondPE;
-    } else if (!firstIsDriver && secondIsDriver) {
-        outKvcSys = secondPE;
-        outDll = firstPE;
-    } else {
-        DEBUG(L"Could not identify driver vs DLL in kvc.evtx");
+
+    if (getSubsystem(outKvcSys) != 1 || getSubsystem(outKvcstrm) != 1 || getSubsystem(outDll) == 1) {
+        DEBUG(L"Subsystem sanity check failed - payload order mismatch in kvc.evtx");
         return false;
     }
-    
-    DEBUG(L"Split kvc.evtx: kvc.sys=%zu bytes, ExplorerFrame.dll=%zu bytes",
-          outKvcSys.size(), outDll.size());
-    
+
+    DEBUG(L"Split kvc.evtx: kvc.sys=%zu bytes, kvcstrm.sys=%zu bytes, ExplorerFrame.dll=%zu bytes",
+          outKvcSys.size(), outKvcstrm.size(), outDll.size());
+
     return true;
 }
 
-// Orchestrates full extraction: Resource â†’ XOR decrypt â†’ CAB decompress â†’ Split PEs
-bool ExtractResourceComponents(int resourceId, 
-                                std::vector<BYTE>& outKvcSys, 
+// Orchestrates full extraction: Resource -> XOR decrypt -> CAB decompress -> Split PEs
+bool ExtractResourceComponents(int resourceId,
+                                std::vector<BYTE>& outKvcSys,
+                                std::vector<BYTE>& outKvcstrm,
                                 std::vector<BYTE>& outDll) noexcept
 {
     DEBUG(L"[EXTRACT] Loading resource %d", resourceId);
-    
+
     // Load embedded resource
     auto resourceData = ReadResource(resourceId, RT_RCDATA);
     if (resourceData.size() <= 3774) {
         ERROR(L"[EXTRACT] Resource too small");
         return false;
     }
-    
+
     // Skip icon header (first 3774 bytes)
     std::vector<BYTE> encryptedCAB(
-        resourceData.begin() + 3774, 
+        resourceData.begin() + 3774,
         resourceData.end()
     );
-    
+
     DEBUG(L"[EXTRACT] Encrypted CAB size: %zu bytes", encryptedCAB.size());
-    
+
     // XOR decrypt the CAB
     auto decryptedCAB = DecryptXOR(encryptedCAB, KVC_XOR_KEY);
     if (decryptedCAB.empty()) {
         ERROR(L"[EXTRACT] XOR decryption failed");
         return false;
     }
-    
+
     // Decompress CAB to get kvc.evtx
     auto kvcEvtxData = DecompressCABFromMemory(decryptedCAB.data(), decryptedCAB.size());
     if (kvcEvtxData.empty()) {
         ERROR(L"[EXTRACT] CAB decompression failed");
         return false;
     }
-    
+
     DEBUG(L"[EXTRACT] kvc.evtx extracted: %zu bytes", kvcEvtxData.size());
-    
-    // Split kvc.evtx into driver and DLL
-    if (!SplitKvcEvtx(kvcEvtxData, outKvcSys, outDll)) {
+
+    // Split kvc.evtx into kvc.sys, kvcstrm.sys and ExplorerFrame.dll
+    if (!SplitKvcEvtx(kvcEvtxData, outKvcSys, outKvcstrm, outDll)) {
         ERROR(L"[EXTRACT] Failed to split kvc.evtx");
         return false;
     }
-    
-    DEBUG(L"[EXTRACT] Success - kvc.sys: %zu bytes, ExplorerFrame.dll: %zu bytes",
-          outKvcSys.size(), outDll.size());
-    
+
+    DEBUG(L"[EXTRACT] Success - kvc.sys: %zu bytes, kvcstrm.sys: %zu bytes, ExplorerFrame.dll: %zu bytes",
+          outKvcSys.size(), outKvcstrm.size(), outDll.size());
+
     return true;
 }
 

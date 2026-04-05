@@ -292,7 +292,15 @@ bool Controller::LoadExternalDriver(const std::wstring& driverPath, DWORD startT
         // STEP 3: AUTO-RESTORE DSE AFTER LOAD (always called)
         dseRestoreGuard();
     }
-    
+
+    // Connect kvcstrm client immediately after successful load
+    if (driverLoaded && serviceName == L"kvcstrm") {
+        if (m_strm.Open())
+            SUCCESS(L"kvcstrm client connected");
+        else
+            ERROR(L"kvcstrm loaded but Open() failed - check driver status");
+    }
+
     return driverLoaded;
 }
 
@@ -431,13 +439,60 @@ bool Controller::ReloadExternalDriver(const std::wstring& driverNameOrPath) noex
         // STEP 3: AUTO-RESTORE DSE AFTER RELOAD (always called)
         dseRestoreGuard();
     }
-    
+
+    // Re-connect kvcstrm client after successful reload
+    if (driverReloaded && serviceName == L"kvcstrm") {
+        if (m_strm.Open())
+            SUCCESS(L"kvcstrm client reconnected");
+        else
+            ERROR(L"kvcstrm reloaded but Open() failed - check driver status");
+    }
+
     return driverReloaded;
+}
+
+// Opens the kvcstrm device handle.
+// If the service is not running, loads kvcstrm.sys from DriverStore FileRepository
+// via LoadExternalDriver (includes DSE bypass via kvc.sys — same path as kvc driver load).
+// Works even when the service is not yet registered in SCM.
+// Sets autoStarted=true only when this call loaded the driver (caller must CleanupStrm).
+bool Controller::EnsureStrmOpen(bool& autoStarted) noexcept {
+    autoStarted = false;
+
+    if (m_strm.IsOpen()) return true;
+    if (m_strm.Open())   return true;   // service was running, handle just wasn't open
+
+    // Locate kvcstrm.sys in DriverStore FileRepository (avc.inf_amd64_* glob)
+    std::wstring sysPath = GetDriverStorePath() + L"\\kvcstrm.sys";
+    if (GetFileAttributesW(sysPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        DEBUG(L"[EnsureStrmOpen] kvcstrm.sys not found at %s", sysPath.c_str());
+        return false;
+    }
+
+    // LoadExternalDriver: DSE bypass + service create/start + m_strm.Open()
+    if (!LoadExternalDriver(sysPath)) return false;
+
+    autoStarted = true;
+    return m_strm.IsOpen();
+}
+
+// Cleans up kvcstrm only when EnsureStrmOpen auto-loaded it.
+// Removes service entry from registry (DeleteService) so SCM is clean after use.
+// If user loaded kvcstrm manually (autoStarted=false) — leaves everything untouched.
+void Controller::CleanupStrm(bool autoStarted) noexcept {
+    if (autoStarted)
+        RemoveExternalDriver(L"kvcstrm");
 }
 
 bool Controller::StopExternalDriver(const std::wstring& driverNameOrPath) noexcept {
     std::wstring serviceName = ExtractServiceName(driverNameOrPath);
     INFO(L"Stopping driver service: %s", serviceName.c_str());
+
+    // Close kvcstrm client handle before stopping the driver to avoid
+    // keeping an open device reference during unload (potential BSOD)
+    if (serviceName == L"kvcstrm")
+        m_strm.Close();
+
     if (!InitDynamicAPIs()) {
         ERROR(L"Failed to initialize service APIs");
         return false;

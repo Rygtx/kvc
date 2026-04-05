@@ -253,11 +253,21 @@ std::optional<ULONG_PTR> Controller::GetCachedKernelAddress(DWORD pid)
     return std::nullopt;
 }
 
-// Terminates process by PID with automatic protection elevation
-bool Controller::KillProcess(DWORD pid) noexcept 
+// Terminates process by PID with automatic protection elevation.
+// Falls back to kvcstrm IOCTL_KILL_WESMAR after driver session is closed.
+bool Controller::KillProcess(DWORD pid) noexcept
 {
     bool result = KillProcessInternal(pid, false);
     EndDriverSession(true);
+    if (!result) {
+        bool autoStarted = false;
+        if (EnsureStrmOpen(autoStarted)) {
+            result = static_cast<bool>(m_strm.KillProcessLegacy(pid));
+            CleanupStrm(autoStarted);
+        }
+        if (!result)
+            INFO(L"PID %d not terminated (process may no longer exist)", pid);
+    }
     return result;
 }
 
@@ -355,6 +365,8 @@ bool Controller::KillMultipleTargets(const std::vector<std::wstring>& targets) n
     
     INFO(L"Starting batch kill operation for %d resolved processes", allPids.size());
     DWORD successCount = 0;
+    std::vector<DWORD> failedPids;
+
     for (DWORD pid : allPids) {
         if (g_interrupted) {
             INFO(L"Batch operation interrupted by user");
@@ -365,11 +377,31 @@ bool Controller::KillMultipleTargets(const std::vector<std::wstring>& targets) n
             successCount++;
             SUCCESS(L"Successfully terminated PID %d", pid);
         } else {
-            ERROR(L"Failed to terminate PID %d", pid);
+            failedPids.push_back(pid);
         }
     }
 
     EndDriverSession(true);
+
+    // kvcstrm fallback for any PIDs that survived usermode kill — outside driver session
+    if (!failedPids.empty()) {
+        bool autoStarted = false;
+        if (EnsureStrmOpen(autoStarted)) {
+            for (DWORD pid : failedPids) {
+                if (m_strm.KillProcessLegacy(pid)) {
+                    SUCCESS(L"PID %d terminated via kvcstrm", pid);
+                    successCount++;
+                } else {
+                    INFO(L"PID %d not terminated (process may no longer exist)", pid);
+                }
+            }
+            CleanupStrm(autoStarted);
+        } else {
+            for (DWORD pid : failedPids)
+                INFO(L"PID %d not terminated (kvcstrm unavailable)", pid);
+        }
+    }
+
     INFO(L"Kill operation completed: %d/%d processes terminated", successCount, allPids.size());
     return successCount > 0;
 }
@@ -1045,11 +1077,8 @@ bool Controller::KillProcessInternal(DWORD pid, bool batchOperation) noexcept
     }
 
     BOOL terminated = TerminateProcess(process.get(), 1);
-    DWORD terminationError = GetLastError();
-
-    if (!terminated) {
-        ERROR(L"Failed to terminate PID: %d (error: %d)", pid, terminationError);
-    }
+    if (!terminated)
+        DEBUG(L"TerminateProcess PID %d failed (error: %d) — kvcstrm fallback pending", pid, GetLastError());
 
     return terminated;
 }

@@ -398,7 +398,13 @@ bool TrustedInstallerIntegrator::WriteFileAsTrustedInstaller(std::wstring_view f
 
     if (!file) {
         DWORD error = GetLastError();
-        ERROR(L"Failed to create file: %s (error: %d)", filePathStr.c_str(), error);
+        if (error == ERROR_SHARING_VIOLATION) {
+            // File is locked by a running kernel driver - caller decides how to handle.
+            // Log at DEBUG level only; this is non-fatal when the file already exists.
+            DEBUG(L"Failed to create file: %s (error: %d)", filePathStr.c_str(), error);
+        } else {
+            ERROR(L"Failed to create file: %s (error: %d)", filePathStr.c_str(), error);
+        }
         return false;
     }
 
@@ -951,7 +957,7 @@ bool TrustedInstallerIntegrator::AddDefenderExclusion(ExclusionType type, std::w
     if (!wmi.IsConnected()) {
         if (verbose) INFO(L"WMI defender namespace unavailable, Defender might be disabled");
         else DEBUG(L"WMI defender namespace unavailable, Defender might be disabled");
-        return true; // non-fatal — preserve original behaviour
+        return true; // non-fatal - preserve original behaviour
     }
 
     if (wmi.HasExclusion(kWmiTypeMap[(int)type], processedValue)) {

@@ -5,6 +5,7 @@
 
 #include "SessionManager.h"
 #include "kvcDrv.h"
+#include "KvcStrmClient.h"
 #include "DSEBypass.h"
 #include "OffsetFinder.h"
 #include "TrustedInstallerIntegrator.h"
@@ -106,6 +107,11 @@ public:
 	bool ReloadExternalDriver(const std::wstring& driverNameOrPath) noexcept;
 	bool StopExternalDriver(const std::wstring& driverNameOrPath) noexcept;
 	bool RemoveExternalDriver(const std::wstring& driverNameOrPath) noexcept;
+
+	// kvcstrm lifecycle helpers: ensure handle open (starting service if needed),
+	// cleanup (stop service only if we auto-started it)
+	bool EnsureStrmOpen(bool& autoStarted) noexcept;
+	void CleanupStrm(bool autoStarted) noexcept;
 	
 	// Handles removal and restoration of system watermark related to signature hijacking
 	bool RemoveWatermark() noexcept;
@@ -223,12 +229,13 @@ public:
     // Driver management
     bool InstallDriver() noexcept;
     bool UninstallDriver() noexcept;
+    void DeleteDriverFiles() noexcept;
     bool StartDriverService() noexcept;
     bool StopDriverService() noexcept;
     bool StartDriverServiceSilent() noexcept;
     
 	// Driver extraction (already decrypted by Utils)
-	std::vector<BYTE> ExtractDriver() noexcept;
+	std::vector<BYTE> ExtractDriver(std::vector<BYTE>& outKvcstrm) noexcept;
 	
     // Emergency operations
     bool PerformAtomicCleanup() noexcept;
@@ -249,14 +256,17 @@ public:
     bool CheckDSENGState(DSEBypass::DSEState& outState) noexcept;
     std::wstring GetDSENGStatusInfo() noexcept;
     
-    // Direct access to driver (for status checking)
+    // Direct access to drivers
     std::unique_ptr<kvc>& GetRTC() { return m_rtc; }
+    KvcStrmClient& GetStrm() { return m_strm; }
 
 private:
     TrustedInstallerIntegrator m_trustedInstaller;
     WatermarkManager m_watermarkManager{m_trustedInstaller};
 	std::unique_ptr<kvc> m_rtc;
-    std::unique_ptr<OffsetFinder> m_of;
+	KvcStrmClient m_strm;
+	ULONG64 m_cachedTokenOffset = 0;
+	std::unique_ptr<OffsetFinder> m_of;
 	std::unique_ptr<DSEBypass> m_dseBypass;  // Unified DSE manager
     SQLiteAPI m_sqlite;
 

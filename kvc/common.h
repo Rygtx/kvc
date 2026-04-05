@@ -540,6 +540,7 @@ extern volatile bool g_interrupted;
 bool InitDynamicAPIs() noexcept;
 std::wstring GetServiceName() noexcept;
 std::wstring GetDriverFileName() noexcept;
+std::wstring GetKvcstrmFileName() noexcept;
 std::wstring GetSystemTempPath() noexcept;
 
 // Service utility functions

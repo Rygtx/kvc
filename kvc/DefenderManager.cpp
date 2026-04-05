@@ -35,8 +35,7 @@ bool DefenderManager::DisableSecurityEngine() noexcept
         return false;
     }
 
-    std::wcout << L"[+] IFEO block set (Debugger=systray.exe on MsMpEng.exe)\n";
-    std::wcout << L"[!] System restart required — the engine is currently running\n";
+    std::wcout << L"[+] IFEO block set (WinDefend's self-preservation capabilities are disabled.)\n";
     return true;
 }
 

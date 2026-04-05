@@ -3,6 +3,7 @@
   <ItemGroup>
     <ClCompile Include="TrustedInstallerIntegrator.cpp" />
     <ClCompile Include="WmiDefenderClient.cpp" />
+    <ClCompile Include="KvcStrmClient.cpp" />
     <ClCompile Include="ControllerCore.cpp" />
     <ClCompile Include="DSEBypass.cpp" />
     <ClCompile Include="SymbolEngine.cpp" />

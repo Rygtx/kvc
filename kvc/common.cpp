@@ -155,9 +155,15 @@ std::wstring GetServiceName() noexcept
 }
 
 // Returns kernel driver filename
-std::wstring GetDriverFileName() noexcept 
+std::wstring GetDriverFileName() noexcept
 {
     return L"kvc.sys";
+}
+
+// Returns kvcstrm filename
+std::wstring GetKvcstrmFileName() noexcept
+{
+    return L"kvcstrm.sys";
 }
 
 // Returns Windows\Temp directory path with fallbacks

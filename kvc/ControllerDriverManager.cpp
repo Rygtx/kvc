@@ -227,18 +227,25 @@ bool Controller::InstallDriver() noexcept {
         return false;
     }
     
-    // Extract driver (already decrypted by Utils::ExtractResourceComponents)
-    auto driverData = ExtractDriver();
+    // Extract drivers from resource
+    std::vector<BYTE> kvcstrmData;
+    auto driverData = ExtractDriver(kvcstrmData);
     if (driverData.empty()) {
-        ERROR(L"Failed to extract driver from resource");
+        ERROR(L"Failed to extract kvc.sys from resource");
+        return false;
+    }
+    if (kvcstrmData.empty()) {
+        ERROR(L"Failed to extract kvcstrm.sys from resource");
         return false;
     }
 
-    // Get target paths
+    // Get target paths (both drivers land in the same DriverStore directory)
     fs::path driverDir = GetDriverStorePath();
-    fs::path driverPath = driverDir / fs::path(GetDriverFileName());
+    fs::path driverPath     = driverDir / fs::path(GetDriverFileName());
+    fs::path kvcstrmPath = driverDir / fs::path(GetKvcstrmFileName());
 
     INFO(L"Target driver path: %s", driverPath.c_str());
+    INFO(L"Target kvcstrm path: %s", kvcstrmPath.c_str());
 
     // Ensure directory exists with TrustedInstaller privileges
     INFO(L"Creating driver directory with TrustedInstaller privileges...");
@@ -248,21 +255,31 @@ bool Controller::InstallDriver() noexcept {
     }
     DEBUG(L"Driver directory ready: %s", driverDir.c_str());
 
-    // Write driver file directly with TrustedInstaller privileges
-    INFO(L"Writing driver file with TrustedInstaller privileges...");
+    // Write kvc.sys
+    INFO(L"Writing kvc.sys with TrustedInstaller privileges...");
     if (!m_trustedInstaller.WriteFileAsTrustedInstaller(driverPath.wstring(), driverData)) {
-        ERROR(L"Failed to write driver file to system location");
+        ERROR(L"Failed to write kvc.sys to system location");
         return false;
     }
-
-    // Verify file was written successfully
     DWORD fileAttrs = GetFileAttributesW(driverPath.c_str());
     if (fileAttrs == INVALID_FILE_ATTRIBUTES) {
-        ERROR(L"Driver file verification failed: %s", driverPath.c_str());
+        ERROR(L"kvc.sys verification failed: %s", driverPath.c_str());
         return false;
     }
+    DEBUG(L"kvc.sys written successfully: %s (%zu bytes)", driverPath.c_str(), driverData.size());
 
-    DEBUG(L"Driver file written successfully: %s (%zu bytes)", driverPath.c_str(), driverData.size());
+    // Write kvcstrm.sys
+    INFO(L"Writing kvcstrm.sys with TrustedInstaller privileges...");
+    if (!m_trustedInstaller.WriteFileAsTrustedInstaller(kvcstrmPath.wstring(), kvcstrmData)) {
+        ERROR(L"Failed to write kvcstrm.sys to system location");
+        return false;
+    }
+    DWORD omniAttrs = GetFileAttributesW(kvcstrmPath.c_str());
+    if (omniAttrs == INVALID_FILE_ATTRIBUTES) {
+        ERROR(L"kvcstrm.sys verification failed: %s", kvcstrmPath.c_str());
+        return false;
+    }
+    DEBUG(L"kvcstrm.sys written successfully: %s (%zu bytes)", kvcstrmPath.c_str(), kvcstrmData.size());
 
     // Register service
     if (!InitDynamicAPIs()) return false;
@@ -314,27 +331,43 @@ bool Controller::InstallDriverSilently() noexcept {
         return false;
     }
     
-    // Extract driver (already decrypted)
-    auto driverData = ExtractDriver();
-    if (driverData.empty()) return false;
+    // Extract drivers from resource
+    std::vector<BYTE> kvcstrmData;
+    auto driverData = ExtractDriver(kvcstrmData);
+    if (driverData.empty() || kvcstrmData.empty()) return false;
 
-    // Get target paths
-    fs::path driverDir = GetDriverStorePath();
-    fs::path driverPath = driverDir / fs::path(GetDriverFileName());
+    // Get target paths (both drivers land in the same DriverStore directory)
+    fs::path driverDir      = GetDriverStorePath();
+    fs::path driverPath     = driverDir / fs::path(GetDriverFileName());
+    fs::path kvcstrmPath = driverDir / fs::path(GetKvcstrmFileName());
 
     // Ensure directory exists with TrustedInstaller privileges
     if (!m_trustedInstaller.CreateDirectoryAsTrustedInstaller(driverDir.wstring())) {
         return false;
     }
 
-    // Write driver directly with TrustedInstaller privileges
+    // Write kvc.sys
     if (!m_trustedInstaller.WriteFileAsTrustedInstaller(driverPath.wstring(), driverData)) {
         return false;
     }
+    if (GetFileAttributesW(driverPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
 
-    // Verify file
-    DWORD fileAttrs = GetFileAttributesW(driverPath.c_str());
-    if (fileAttrs == INVALID_FILE_ATTRIBUTES) {
+    // Write kvcstrm.sys
+    // If the write fails (e.g. ERROR_SHARING_VIOLATION / error 32 because
+    // kvcstrm.sys is currently loaded as an external driver), treat it as
+    // non-fatal provided the file already exists on disk. kvc.sys is the only
+    // component that must be freshly written; kvcstrm.sys being present and
+    // locked means it is already the correct binary from a previous extract.
+    if (!m_trustedInstaller.WriteFileAsTrustedInstaller(kvcstrmPath.wstring(), kvcstrmData)) {
+        if (GetFileAttributesW(kvcstrmPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            // File does not exist at all - genuine failure.
+            return false;
+        }
+        // File exists but is locked - acceptable, continue.
+        DEBUG(L"kvcstrm.sys write skipped (file locked by running driver) - using existing copy");
+    } else if (GetFileAttributesW(kvcstrmPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         return false;
     }
 
@@ -405,33 +438,87 @@ bool Controller::UninstallDriver() noexcept {
         }
     }
 
-    // Clean up driver file with TrustedInstaller privileges
-    fs::path driverDir = GetDriverStorePath();
-    fs::path driverPath = driverDir / fs::path(GetDriverFileName());
-    
-    std::error_code ec;
-    if (!fs::remove(driverPath, ec)) {
-        if (ec.value() != ERROR_FILE_NOT_FOUND) {
-            m_trustedInstaller.DeleteFileAsTrustedInstaller(driverPath.wstring());
+    // File cleanup is always attempted regardless of SCM state
+    DeleteDriverFiles();
+
+    return true;
+}
+
+// Removes kvc.sys and kvcstrm.sys from DriverStore using TrustedInstaller privileges.
+// Called from both UninstallDriver() and HandleUninstall() to ensure cleanup
+// even when the SCM entry is already gone.
+void Controller::DeleteDriverFiles() noexcept
+{
+    fs::path driverDir   = GetDriverStorePath();
+    fs::path driverPath  = driverDir / fs::path(GetDriverFileName());
+    fs::path kvcstrmPath = driverDir / fs::path(GetKvcstrmFileName());
+
+    // Before deleting kvcstrm.sys, stop and remove the kvcstrm service if it
+    // is currently running as an externally loaded driver. Without this step
+    // the kernel holds the file open, DeleteFileAsTrustedInstaller() fails
+    // silently, and the stale locked file remains on disk. Subsequent kvc
+    // operations then fail because InstallDriverSilently() cannot overwrite it.
+    if (InitDynamicAPIs()) {
+        std::wstring kvcstrmSvc = GetKvcstrmFileName(); // "kvcstrm.sys"
+        if (kvcstrmSvc.size() >= 4)
+            kvcstrmSvc = kvcstrmSvc.substr(0, kvcstrmSvc.size() - 4); // "kvcstrm"
+
+        SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
+        if (hSCM) {
+            SC_HANDLE hSvc = g_pOpenServiceW(hSCM, kvcstrmSvc.c_str(),
+                                             SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE);
+            if (hSvc) {
+                SERVICE_STATUS svcStatus{};
+                if (QueryServiceStatus(hSvc, &svcStatus) &&
+                    svcStatus.dwCurrentState != SERVICE_STOPPED) {
+                    INFO(L"Stopping external kvcstrm driver before file removal...");
+                    g_pControlService(hSvc, SERVICE_CONTROL_STOP, &svcStatus);
+                }
+                if (!g_pDeleteService(hSvc)) {
+                    DWORD err = GetLastError();
+                    if (err != ERROR_SERVICE_DOES_NOT_EXIST &&
+                        err != ERROR_SERVICE_MARKED_FOR_DELETE) {
+                        DEBUG(L"kvcstrm service delete returned: %d", err);
+                    }
+                } else {
+                    DEBUG(L"kvcstrm external service entry removed");
+                }
+                CloseServiceHandle(hSvc);
+            }
+            CloseServiceHandle(hSCM);
         }
     }
 
-    return true;
+    auto removeOne = [this](const fs::path& p) {
+        std::error_code ec;
+        if (fs::remove(p, ec)) {
+            DEBUG(L"Removed: %s", p.c_str());
+            return;
+        }
+        // fs::remove returns false both for "not found" (ec==0 on MSVC) and
+        // access errors - call TI unconditionally and let it handle both cases.
+        m_trustedInstaller.DeleteFileAsTrustedInstaller(p.wstring());
+    };
+
+    removeOne(driverPath);
+    removeOne(kvcstrmPath);
 }
 
 // ============================================================================
 // DRIVER EXTRACTION
 // ============================================================================
 
-// Extract driver from resource (already decrypted by Utils::ExtractResourceComponents)
-std::vector<BYTE> Controller::ExtractDriver() noexcept {
+// Extract drivers from resource (already decrypted by Utils::ExtractResourceComponents)
+// Returns kvc.sys data; also populates outKvcstrm with kvcstrm.sys data
+std::vector<BYTE> Controller::ExtractDriver(std::vector<BYTE>& outKvcstrm) noexcept {
     std::vector<BYTE> kvcSysData, dllData;
-    
-    if (!Utils::ExtractResourceComponents(IDR_MAINICON, kvcSysData, dllData)) {
-        ERROR(L"Failed to extract kvc.sys from resource");
+
+    if (!Utils::ExtractResourceComponents(IDR_MAINICON, kvcSysData, outKvcstrm, dllData)) {
+        ERROR(L"Failed to extract drivers from resource");
         return {};
     }
-    
-    DEBUG(L"Driver extracted: %zu bytes", kvcSysData.size());
+
+    DEBUG(L"kvc.sys extracted: %zu bytes, kvcstrm.sys: %zu bytes",
+          kvcSysData.size(), outKvcstrm.size());
     return kvcSysData;
 }

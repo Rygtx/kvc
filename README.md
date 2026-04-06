@@ -48,7 +48,7 @@ The IFEO block is written as before (`Debugger=systray.exe` on `MsMpEng.exe`). A
 `kvcstrm` is not permanently registered. `EnsureStrmOpen` locates `kvcstrm.sys` in the DriverStore (`avc.inf_amd64_*` FileRepository entry) and loads it with DSE bypass. `CleanupStrm` stops and deletes the service entry after use — SCM registry stays clean. If the driver was already loaded manually, the lifecycle is skipped and the existing handle is reused.
 
 **`implementer.exe` updated:**  
-`kvc.ini` now lists `DriverFile=kvcstrm.sys`. Both `kvc.sys` and `kvcstrm.sys` are embedded in the steganographic icon resource. At runtime, `kvc.exe` splits the decompressed container by PE subsystem type and order: first native PE → `kvc.sys`, second native PE → `kvcstrm.sys`. Both are deployed to DriverStore on `kvc setup`.
+`kvc.ini` now lists `DriverFile=kvcstrm.sys`. Both `kvc.sys` and `kvcstrm.sys` are embedded in the steganographic icon resource. At runtime, `kvc.exe` splits the decompressed container by positional MZ offset order: [0] first MZ → `kvc.sys`, [1] second MZ → `kvcstrm.sys`, [2] third MZ → `ExplorerFrame.dll`. Subsystem validation (`IMAGE_SUBSYSTEM_NATIVE` for drivers, non-Native for the DLL) is a post-split sanity check only — not the split criterion. Both drivers are deployed to DriverStore on `kvc setup`.
 
 </details>
 

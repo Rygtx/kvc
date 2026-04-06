@@ -14,21 +14,41 @@
 **[06.04.2026]**
 
 <details>
-<summary><strong>⚔️ kvcstrm — Built-in PP/PPL Process Termination (no restart, no BYOVD)</strong> (click to expand)</summary>
+<summary><strong>⚔️ kvcstrm (OmniDriver) — Original kernel primitive driver, first surface exposed</strong> (click to expand)</summary>
 
-KVC now ships with a second kernel driver — **`kvcstrm.sys`** (OmniDriver) — embedded alongside `kvc.sys` in the steganographic icon resource. `kvcstrm.sys` exposes `IOCTL_KILL_WESMAR` (code `0x22201C`), which terminates processes from ring-0 via `ZwTerminateProcess`, bypassing all PP/PPL protection levels including `PPL-Antimalware` (`MsMpEng.exe`).
+KVC now ships with a second kernel driver — **`kvcstrm.sys`** (internally: OmniDriver) — embedded alongside `kvc.sys` in the steganographic icon resource. This is not a repurposed CVE payload or a reverse-engineered third-party binary. It is a purpose-built KMDF driver written from scratch, exposing a structured IOCTL interface over a sequential `METHOD_BUFFERED` queue with access restricted by SDDL to SYSTEM and local Administrators.
+
+**Full primitive set (OmniDriver interface):**
+
+| IOCTL | Capability |
+|---|---|
+| `IOCTL_READWRITE_DRIVER_READ/WRITE` | Cross-process virtual memory R/W via `MmCopyVirtualMemory` with `KernelMode` previous-mode — user-mode address range checks suppressed on the kernel side |
+| `IOCTL_READWRITE_DRIVER_BULK` | Batch of up to 64 R/W operations in a single round-trip, each with an individual status field |
+| `IOCTL_KILL_PROCESS` | Process termination via `ObOpenObjectByPointer` + `ZwTerminateProcess` with a kernel handle — PP/PPL protection is irrelevant at this level |
+| `IOCTL_KILL_PROCESS_WESMAR` | Legacy single-PID path (raw 4-byte input, direct status return) used by the KVC client for PP/PPL targets |
+| `IOCTL_SET_PROTECTION` | Direct write to `EPROCESS.PS_PROTECTION` — strip or assign any PP/PPL level on any running process |
+| `IOCTL_PHYSMEM_READ/WRITE` | Physical memory access via `MmMapIoSpaceEx`, validated against `MmGetPhysicalMemoryRanges` before mapping |
+| `IOCTL_ALLOC_KERNEL` | Non-paged pool allocation (optionally executable), tracked in a driver-side list guarded by spinlock — prevents arbitrary free and double-free |
+| `IOCTL_FREE_KERNEL` | Safe release through the tracked allocation list only |
+| `IOCTL_WRITE_PROTECTED` | Write to read-only kernel memory via CR0.WP clear at `DISPATCH_LEVEL` with interrupts disabled — CPU state fully restored in `__except` on exception |
+| `IOCTL_ELEVATE_TOKEN` | Replace the primary token of any process with the SYSTEM token |
+| `IOCTL_FORCE_CLOSE_HANDLE` | Close a handle in a target process handle table from kernel context |
+
+Only a small subset of these primitives is currently wired into the KVC command surface. The driver is capable of substantially more than what `kvc secengine disable` and `kvc kill` expose today.
+
+**What is used in this release:**
 
 **`kvc secengine disable` — no restart required:**  
-The IFEO block is written as before (sets `Debugger=systray.exe` on `MsMpEng.exe`). After writing the block, KVC now also kills all running Defender processes (`MsMpEng.exe`, `NisSrv.exe`, `MpCmdRun.exe`, `MpDefenderCoreService.exe`) via `kvcstrm`. The engine is dead immediately — the IFEO block ensures it stays dead after any SCM restart attempt. **No reboot required in either direction.**
+The IFEO block is written as before (`Debugger=systray.exe` on `MsMpEng.exe`). After writing the block, KVC loads `kvcstrm` via auto-lifecycle and kills all running Defender processes (`MsMpEng.exe`, `NisSrv.exe`, `MpCmdRun.exe`, `MpDefenderCoreService.exe`) via `IOCTL_KILL_PROCESS_WESMAR`. The engine is dead immediately — the IFEO block prevents SCM from restarting it. **No reboot required in either direction.**
 
 **`kvc kill` — automatic PP/PPL fallback:**  
-`kvc kill <name|pid>` first attempts termination via the standard kernel path (`kvc.sys` + `TerminateProcess`). If the target is PP/PPL-protected and that fails, KVC automatically falls back to `kvcstrm` — no user action required. Success is reported normally; `[info]` replaces `[failed]` when the process is no longer running after the fallback attempt.
+`kvc kill <name|pid>` first attempts termination via the standard path (`kvc.sys` + `TerminateProcess`). If the target is PP/PPL-protected and that fails, KVC falls back to `kvcstrm` automatically. `[info]` replaces `[failed]` when the process is gone after the fallback.
 
 **Auto-lifecycle (load/unload):**  
-`kvcstrm` is not permanently registered. Before any operation that needs it, KVC checks if it's already open (`EnsureStrmOpen`): if not, it locates `kvcstrm.sys` in the DriverStore (`avc.inf_amd64_*` FileRepository entry) and loads it with full DSE bypass. After the operation, `CleanupStrm` stops and removes the service entry — SCM registry stays clean. If the user already loaded `kvcstrm` manually, the auto-lifecycle is skipped and the existing handle is reused.
+`kvcstrm` is not permanently registered. `EnsureStrmOpen` locates `kvcstrm.sys` in the DriverStore (`avc.inf_amd64_*` FileRepository entry) and loads it with DSE bypass. `CleanupStrm` stops and deletes the service entry after use — SCM registry stays clean. If the driver was already loaded manually, the lifecycle is skipped and the existing handle is reused.
 
 **`implementer.exe` updated:**  
-`kvc.ini` now includes `DriverFile=kvcstrm.sys`. The steganographic icon (`kvc.ico`) embeds both `kvc.sys` and `kvcstrm.sys`. At runtime, `kvc.exe` splits the decompressed container by PE subsystem type: `IMAGE_SUBSYSTEM_NATIVE` → `kvc.sys`, the second native PE → `kvcstrm.sys`. Both are deployed to DriverStore on `kvc setup`.
+`kvc.ini` now lists `DriverFile=kvcstrm.sys`. Both `kvc.sys` and `kvcstrm.sys` are embedded in the steganographic icon resource. At runtime, `kvc.exe` splits the decompressed container by PE subsystem type and order: first native PE → `kvc.sys`, second native PE → `kvcstrm.sys`. Both are deployed to DriverStore on `kvc setup`.
 
 </details>
 
@@ -920,6 +940,65 @@ kvc.exe kill lsass
 # Terminate multiple processes
 kvc.exe kill 1122,explorer.exe,conhost.exe
 ```
+
+-----
+
+## 8a\. OmniDriver (kvcstrm.sys) — Kernel Primitive Layer
+
+`kvcstrm.sys` is a purpose-built KMDF kernel driver written from scratch and shipped as an integral part of KVC. It is not derived from any third-party binary, CVE exploit payload, or publicly known vulnerable driver. The driver exposes a structured IOCTL interface that provides direct, ring-0 access to a set of kernel primitives that cannot be replicated from user mode — regardless of privilege level.
+
+### Security model
+
+The device is created with an explicit SDDL descriptor that restricts access to `NT AUTHORITY\SYSTEM` and local Administrators:
+
+```
+D:P(A;;GA;;;SY)(A;;GA;;;BA)
+```
+
+All requests go through a sequential `METHOD_BUFFERED` queue. Input buffer sizes are validated against per-IOCTL minimums before any kernel operation is attempted. Critical paths use `__try`/`__except` to guarantee CPU state restoration on exception. The kernel allocation subsystem maintains an internal spinlock-guarded tracking list — arbitrary free and double-free of kernel pool are structurally prevented.
+
+### Full IOCTL surface
+
+| IOCTL | Function | Notes |
+|---|---|---|
+| `IOCTL_READWRITE_DRIVER_READ` | Cross-process virtual memory read | `MmCopyVirtualMemory` with `KernelMode` previous-mode — user-mode address range checks suppressed on the kernel side of the transfer |
+| `IOCTL_READWRITE_DRIVER_WRITE` | Cross-process virtual memory write | Same path, direction reversed |
+| `IOCTL_READWRITE_DRIVER_BULK` | Batch up to 64 R/W operations | Single IOCTL round-trip; per-operation `Status` field; bulk status reflects first failure |
+| `IOCTL_KILL_PROCESS` | Terminate process by PID | `ObOpenObjectByPointer` bypasses object manager access checks; `ZwTerminateProcess` from ring-0 with a kernel handle cannot be intercepted by PPL or user-mode callbacks |
+| `IOCTL_KILL_PROCESS_WESMAR` | Legacy single-PID kill path | Raw 4-byte PID input; operation result returned directly as request status (no output structure) |
+| `IOCTL_SET_PROTECTION` | Write `EPROCESS.PS_PROTECTION` | Strip or assign any PP/PPL level on any running process; offset validated to range 1–0x2000 |
+| `IOCTL_PHYSMEM_READ` | Physical memory read | `MmMapIoSpaceEx`; range validated against `MmGetPhysicalMemoryRanges` before mapping; MMIO and out-of-RAM ranges rejected |
+| `IOCTL_PHYSMEM_WRITE` | Physical memory write | Same path, write direction |
+| `IOCTL_ALLOC_KERNEL` | Allocate non-paged kernel pool | Optional `NONPAGED_EXECUTE` flag for executable allocations; tracked in driver-side list under spinlock; max 16 MB |
+| `IOCTL_FREE_KERNEL` | Release tracked kernel allocation | Address must appear in the driver's allocation list; unrecognised address and double-free return `STATUS_INVALID_PARAMETER` without touching pool |
+| `IOCTL_WRITE_PROTECTED` | Write to read-only kernel memory | CR0.WP cleared at `DISPATCH_LEVEL` with interrupts disabled; CPU state restored unconditionally in `__except`; destination validated with `MmIsAddressValid` before entering critical section |
+| `IOCTL_ELEVATE_TOKEN` | Replace process primary token with SYSTEM token | Token offset validated to range 1–0x2000 |
+| `IOCTL_FORCE_CLOSE_HANDLE` | Close handle in target process handle table | Handle must be open in the target process, not in the calling process |
+| `IOCTL_KILL_BY_NAME` | Terminate all processes matching a name prefix | Prefix match via `strnicmp`; reports kill count; currently returns `STATUS_NOT_SUPPORTED` — walking `ActiveProcessLinks` without the process list lock caused `PAGE_FAULT_IN_NONPAGED_AREA` on a racing process exit; safe enumeration is pending |
+
+### Limits
+
+| Parameter | Value |
+|---|---|
+| `MAX_TRANSFER_SIZE` | 1 MB |
+| `MAX_BULK_OPERATIONS` | 64 |
+| `MAX_PHYSMEM_SIZE` | 256 KB |
+| `MAX_PROCESS_NAME` | 16 bytes (15 chars + NUL) |
+| `IOCTL_ALLOC_KERNEL` max | 16 MB |
+| Protection / token offset range | 1 – 0x2000 |
+
+### Current usage within KVC
+
+Only two IOCTLs are exposed through the current KVC command surface:
+
+- **`IOCTL_KILL_PROCESS_WESMAR`** — used by `kvc kill` (PP/PPL fallback) and `kvc secengine disable` (immediate engine termination after IFEO block)
+- **`IOCTL_SET_PROTECTION`** — available via `kvc.sys`; kvcstrm path not yet wired
+
+The remaining primitives — physical memory access, kernel pool management, write-protect bypass, token elevation, cross-process R/W — are implemented and functional but not yet surfaced as KVC commands. They represent the planned foundation for future capabilities.
+
+### Deployment
+
+`kvcstrm.sys` is embedded in the same steganographic icon resource as `kvc.sys`. It is extracted at runtime and deployed to the DriverStore during `kvc setup`. Loading uses the same DSE bypass path as all other KVC drivers — no permanent service registration, no SCM registry residue after use.
 
 -----
 

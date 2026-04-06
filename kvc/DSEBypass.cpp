@@ -212,13 +212,18 @@ bool DSEBypass::DisableStandard() noexcept {
         return true;
     }
 
-    // Standard method only works with 0x00000006 (no HVCI)
-    // HVCI handling is done in Controller before calling this
-    if (currentValue != 0x00000006) {
-        INFO(L"g_CiOptions value: 0x%08X - direct patching not supported", currentValue);
+    // Block only if HVCI/Memory Integrity is active - direct patch won't persist under hypervisor
+    // HVCI handling is done in Controller before calling this, but guard defensively here too
+    if (IsHVCIEnabled(currentValue)) {
+        INFO(L"g_CiOptions value: 0x%08X - Memory Integrity active, direct patching not supported", currentValue);
         INFO(L"Use modern method: 'kvc dse off --safe'");
         INFO(L"Or use legacy HVCI bypass: 'kvc dse off' with 0x0001C006 flag");
         return true;
+    }
+    // Non-standard CI flags present (e.g. 0x00004006 on Windows 11) - proceed, but note safer option
+    if (currentValue != 0x00000006) {
+        INFO(L"g_CiOptions value: 0x%08X (extra CI flags, no HVCI) - patching directly", currentValue);
+        INFO(L"Note: 'kvc dse off --safe' is available as a non-invasive alternative");
     }
     
     // Disable DSE by clearing bits 1 and 2

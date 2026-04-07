@@ -103,6 +103,46 @@ RecursiveDelete=YES
 
 > **Note:** Section names (`[Driver0]`, `[Rename1]`, `[Delete1]`) are arbitrary labels — the parser ignores the name and reads only `Action=`. Sections are processed in file order.
 
+<details>
+<summary><strong>🔧 RENAME & DELETE — Native NT Path File Operations</strong> (click to expand)</summary>
+
+Both `RENAME` and `DELETE` actions operate at the **NT native file system level**, using raw `NtOpenFile` / `NtSetInformationFile` / `NtQueryDirectoryFile` syscalls — no Win32 `MoveFile` or `DeleteFile` involvement. This means they work **before any filesystem filter drivers are loaded**, operating directly against the I/O manager.
+
+#### RENAME Implementation
+
+The rename operation uses `NtSetInformationFile` with **FileRenameInformation (class 10)**:
+
+1. Opens the target path with `FILE_READ_DATA | SYNCHRONIZE` to check if it already exists
+2. If the target exists and the source also exists, the operation is **skipped silently** (`STATUS_SUCCESS` returned, no error)
+3. Opens the source with `DELETE | SYNCHRONIZE` access and `FILE_OPEN_FOR_BACKUP_INTENT` — this flag grants access even to files that would otherwise be locked
+4. Constructs a `FILE_RENAME_INFORMATION` structure with `ReplaceIfExists` (YES/NO) and the target path as a variable-length Unicode string
+5. Calls `NtSetInformationFile(hFile, &iosb, pRename, requiredSize - sizeof(WCHAR), 10)` — the `- sizeof(WCHAR)` accounts for the fact that `FILE_RENAME_INFORMATION` already declares one `WCHAR` in the flexible array member `FileName[]`
+
+**Key detail:** The rename is atomic at the I/O manager level. No temporary copy is created. The source file is simply relinked to the target path in the MFT/FAT. If the source doesn't exist, the operation fails with `STATUS_OBJECT_NAME_NOT_FOUND`.
+
+#### DELETE Implementation
+
+The delete operation uses `NtSetInformationFile` with **FileDispositionInformation (class 13)**:
+
+1. Opens the target with `DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE` and `FILE_OPEN_FOR_BACKUP_INTENT`
+2. Queries `FileStandardInformation` to determine if the target is a **file or directory**
+3. **If it's a file:** sets `FILE_DISPOSITION_INFORMATION.DeleteFile = TRUE` via `NtSetInformationFile(..., 13)` — the file is marked for deletion on close (actual removal happens when the last handle is closed)
+4. **If it's a directory and `RecursiveDelete=NO`:** opens with `FILE_DIRECTORY_FILE` flag, sets disposition to delete — only succeeds if the directory is empty
+5. **If it's a directory and `RecursiveDelete=YES`:** calls `DeleteDirectoryRecursive()` which:
+   - Opens the directory with `NtQueryDirectoryFile` and iterates all entries (`FileDirectoryInformation`)
+   - Skips `.` and `..` entries
+   - Recursively descends into subdirectories (depth-first)
+   - For each file/subdirectory: opens with `DELETE | SYNCHRONIZE`, sets disposition to delete, closes handle
+   - After all children are processed, opens the parent directory itself and marks it for deletion
+
+**Key detail:** The recursive walk uses a **4 KB directory buffer** (`FILE_DIRECTORY_INFORMATION`). If a directory contains more entries than fit in 4 KB, `NtQueryDirectoryFile` is called repeatedly with `firstQuery = FALSE` to continue enumeration. Each nested call to `DeleteDirectoryRecursive` opens its own directory handle — the maximum recursion depth is limited by the **512-byte stack buffer** in `ExecuteRename` and the `MAX_PATH_LEN` (512 WCHARs) in path construction, both validated with `validate_string_space` bounds checks before any string copy.
+
+#### Why Native NT Paths?
+
+Both actions require paths in the NT native format: `\??\C:\Windows\Temp` (for DOS drive letters) or `\Device\HarddiskVolume1\Windows\Temp` (for device paths). This is the format the NT I/O manager understands internally — it bypasses the Win32 subsystem entirely. At the SMSS boot phase, there is no `kernel32.dll`, no `MoveFileEx`, no `DeleteFile` — only NT syscalls exist.
+
+</details>
+
 #### HVCI Handling
 
 If Memory Integrity (`g_CiOptions & 0x0001C000`) is active, `kvc_smss.exe` patches the SYSTEM registry hive directly (offline binary edit) to disable HVCI, schedules a reboot via the `RebootGuardian` service, and completes driver loading on the subsequent boot with HVCI suppressed.

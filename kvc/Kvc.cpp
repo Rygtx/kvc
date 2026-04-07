@@ -182,7 +182,13 @@ int HandleDriverCommand(int argc, wchar_t* argv[]) {
     return 1;
 }
 
-int HandleUninstall(int, wchar_t**) {
+int HandleUninstall(int argc, wchar_t** argv) {
+    // kvc uninstall smss - remove only SMSS loader (BootExecute + drivers.ini)
+    if (argc >= 3 && std::wstring(argv[2]) == L"smss") {
+        return g_controller->UninstallSmss() ? 0 : 1;
+    }
+
+    // kvc uninstall - remove NT service AND SMSS loader
     INFO(L"Uninstalling Kernel Vulnerability Capabilities Framework service...");
     bool success = ServiceManager::UninstallService();
 
@@ -203,6 +209,11 @@ int HandleUninstall(int, wchar_t**) {
         else ERROR(L"Failed to clean registry configuration: %d", result);
         RegCloseKey(hKey);
     }
+
+    // Also clean up SMSS loader if present
+    INFO(L"Removing SMSS boot-phase loader (if installed)...");
+    g_controller->UninstallSmss();
+
     return success ? 0 : 1;
 }
 
@@ -344,11 +355,11 @@ int HandleSecEngineCommand(int argc, wchar_t* argv[]) {
     if (sub == L"disable") {
         bool doRestart = (argc > 3 && std::wstring(argv[3]) == L"--restart");
 
-        // Step 1: set IFEO block (persistent — survives even if kernel kill fails)
+        // Step 1: set IFEO block (persistent - survives even if kernel kill fails)
         if (!DefenderManager::DisableSecurityEngine())
             return 1;
 
-        // Step 2: kernel kill via kvcstrm (bypasses PPL/PP — no restart needed).
+        // Step 2: kernel kill via kvcstrm (bypasses PPL/PP - no restart needed).
         // EnsureStrmOpen auto-starts kvcstrm service if registered but not running;
         // CleanupStrm stops it afterward only when we auto-started it.
         bool killedViaKernel = false;
@@ -378,7 +389,7 @@ int HandleSecEngineCommand(int argc, wchar_t* argv[]) {
                 }
                 g_controller->CleanupStrm(autoStarted);
             } else {
-                INFO(L"kvcstrm not available — register with: kvc driver load kvcstrm");
+                INFO(L"kvcstrm not available - register with: kvc driver load kvcstrm");
             }
         }
 
@@ -387,7 +398,7 @@ int HandleSecEngineCommand(int argc, wchar_t* argv[]) {
                 INFO(L"Initiating system restart...");
                 InitiateSystemRestart();
             } else {
-                INFO(L"kvcstrm not loaded — system restart required to stop the engine");
+                INFO(L"kvcstrm not loaded - system restart required to stop the engine");
                 INFO(L"Load kvcstrm first: kvc driver load kvcstrm");
             }
         }
@@ -397,7 +408,7 @@ int HandleSecEngineCommand(int argc, wchar_t* argv[]) {
 
     // ── enable ───────────────────────────────────────────────────────────────
     // Removes IFEO Debugger block, then starts WinDefend via SCM.
-    // MsMpEng.exe launches on its own — no restart needed.
+    // MsMpEng.exe launches on its own - no restart needed.
     if (sub == L"enable") {
         if (DefenderManager::EnableSecurityEngine()) {
             return 0;
@@ -413,7 +424,7 @@ int HandleSecEngineCommand(int argc, wchar_t* argv[]) {
         // IFEO block line
         if (s.ifeoBlocked) {
             SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_INTENSITY);
-            std::wcout << L" [IFEO] MsMpEng.exe blocked — Debugger=" << s.ifeoDebugger << L"\n";
+            std::wcout << L" [IFEO] MsMpEng.exe blocked - Debugger=" << s.ifeoDebugger << L"\n";
         } else {
             SetConsoleTextAttribute(hCon, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
             std::wcout << L" [IFEO] No block set on MsMpEng.exe\n";
@@ -439,19 +450,19 @@ int HandleSecEngineCommand(int argc, wchar_t* argv[]) {
         switch (s.state) {
             case DefenderManager::SecurityState::ACTIVE:
                 SetConsoleTextAttribute(hCon, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-                std::wcout << L"ACTIVE — Defender engine is running\n";
+                std::wcout << L"ACTIVE - Defender engine is running\n";
                 break;
             case DefenderManager::SecurityState::IFEO_BLOCKED:
                 SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_INTENSITY);
-                std::wcout << L"IFEO BLOCKED — engine will not launch (restart to fully deactivate)\n";
+                std::wcout << L"IFEO BLOCKED - engine will not launch (restart to fully deactivate)\n";
                 break;
             case DefenderManager::SecurityState::INACTIVE:
                 SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-                std::wcout << L"INACTIVE — WinDefend stopped, no IFEO block\n";
+                std::wcout << L"INACTIVE - WinDefend stopped, no IFEO block\n";
                 break;
             case DefenderManager::SecurityState::NOT_INSTALLED:
                 SetConsoleTextAttribute(hCon, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-                std::wcout << L"NOT INSTALLED — WinDefend service not found\n";
+                std::wcout << L"NOT INSTALLED - WinDefend service not found\n";
                 break;
             default:
                 std::wcout << L"UNKNOWN\n";
@@ -648,7 +659,12 @@ int wmain(int argc, wchar_t* argv[])
     
     static const std::unordered_map<std::wstring, CommandHandler> commandMap = {
         // --- Service ---
-        {L"install", [](int, wchar_t**) {
+        {L"install", [](int argc, wchar_t** argv) {
+            // kvc install <driver>  - register driver for SMSS boot-phase loading
+            if (argc >= 3) {
+                return g_controller->InstallSmssDriver(argv[2]) ? 0 : 1;
+            }
+            // kvc install  - install kvc NT service
             wchar_t exePath[MAX_PATH];
             if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) { ERROR(L"Failed to get current executable path"); return 1; }
             INFO(L"Installing Kernel Vulnerability Capabilities Framework service...");

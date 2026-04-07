@@ -11,6 +11,146 @@
 ---
 ## 📋 Changelog
 
+**[08.04.2026]**
+
+<details>
+<summary><strong>🚀 kvc_smss — SMSS Boot-Phase Driver Loader (C, NATIVE subsystem)</strong> (click to expand)</summary>
+
+KVC now ships a fourth embedded binary — **`kvc_smss.exe`** — a native application (`SUBSYSTEM:NATIVE`) written entirely in C, executed by the Windows Session Manager (SMSS.EXE) during the early boot phase, before `services.exe`, before `winlogon.exe`, and critically, before any antivirus user-mode components are initialized.
+
+#### Why This Phase Matters
+
+The SMSS phase is one of the last remaining execution contexts that runs with full kernel access and no user-mode security infrastructure in place. There is no Defender, no ETW-based detection, no filter drivers for user-mode callbacks — just the Session Manager, the kernel, and the hardware. Any kernel driver loaded at this stage is indistinguishable from a legitimately boot-loaded driver from the perspective of subsequent user-mode security software.
+
+#### Architecture
+
+`kvc_smss.exe` is a pure C binary with no CRT dependency, linked as `SUBSYSTEM:NATIVE`. It communicates directly with the kernel via NT native APIs (`NtDeviceIoControlFile`, `NtReadFile`, `NtQuerySystemInformation`). It uses `kvc.sys` found in the DriverStore (`avc.inf_amd64_*\kvc.sys`) as its DSE bypass primitive — a signed, legitimate driver already present on the system from a prior `kvc setup` run. No new vulnerable driver is dropped to disk.
+
+The full DSE bypass cycle per driver load:
+
+```
+STEP 1  Load kvc.sys (RTCore64, from DriverStore — already signed)
+STEP 2  Resolve ntoskrnl.exe base via NtQuerySystemInformation
+STEP 3  Patch SeCiCallbacks+0x20 (CiValidateImageHeader) → ZwFlushInstructionCache
+STEP 4  Load unsigned target driver (NtLoadDriver)
+STEP 5  Restore original SeCiCallbacks callback
+STEP 6  Unload kvc.sys
+```
+
+Kernel symbol offsets (`Offset_SeCiCallbacks`, `Offset_SafeFunction`) are resolved at install time via PDB download — the same `SymbolEngine` infrastructure used by `kvc dse off --safe` — and written into `C:\Windows\drivers.ini`. No PDB download occurs during boot.
+
+#### INI-Driven Operation
+
+All operations are declared in `C:\Windows\drivers.ini` (UTF-16 LE with BOM). The file is generated automatically by `kvc install <driver>` with a populated `[Config]` section and a `[Driver0]` entry. The full format supports four action types:
+
+| Action | Description |
+|---|---|
+| `LOAD` | Load unsigned kernel driver with full DSE bypass cycle |
+| `UNLOAD` | Stop and remove a running driver service |
+| `RENAME` | Rename or move a file/directory at native NT path level |
+| `DELETE` | Delete a file or directory tree (optionally recursive) |
+
+**Example `C:\Windows\drivers.ini` (full reference):**
+
+```ini
+; ============================================================================
+; BootBypass Configuration File — UTF-16 LE with BOM
+; Operations execute sequentially in declaration order.
+; ============================================================================
+
+[Config]
+Execute=YES                       ; NO = disable all operations without removing entries
+RestoreHVCI=NO                    ; YES = re-enable Memory Integrity flag after patching
+Verbose=NO                        ; YES = screen output during boot; NO = silent (verify via sc query)
+
+DriverDevice=\Device\RTCore64     ; kvc.sys device path
+IoControlCode_Read=2147492936     ; 0x80002048 — RTCore64 physical memory read
+IoControlCode_Write=2147492940    ; 0x8000204C — RTCore64 physical memory write
+
+Offset_SeCiCallbacks=0xF047A0    ; ntoskrnl offset to SeCiCallbacks (auto-set by kvc install)
+Offset_Callback=0x20             ; offset within SeCiCallbacks to CiValidateImageHeader
+Offset_SafeFunction=0x6A7BB0     ; ntoskrnl offset to ZwFlushInstructionCache
+
+; --- LOAD: unsigned driver with AutoPatch DSE bypass ---
+[Driver0]
+Action=LOAD
+AutoPatch=YES
+ServiceName=omnidriver
+DisplayName=omnidriver
+ImagePath=\SystemRoot\System32\drivers\omnidriver.sys
+Type=KERNEL
+StartType=DEMAND
+CheckIfLoaded=YES                 ; Skip silently if already loaded
+
+; --- UNLOAD: stop a running driver ---
+[Driver1]
+Action=UNLOAD
+ServiceName=WdFilter
+
+; --- RENAME: move/rename file at NT path level (pre-filesystem-filter) ---
+[Rename1]
+Action=RENAME
+SourcePath=\??\C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.25110.5-0\MsMpEng_.exe
+TargetPath=\??\C:\ProgramData\Microsoft\Windows Defender\Platform\4.18.25110.5-0\MsMpEng.exe
+ReplaceIfExists=NO
+
+; --- DELETE: remove file or directory tree ---
+[Delete1]
+Action=DELETE
+DeletePath=\??\C:\Windows\Temp
+RecursiveDelete=YES
+```
+
+> **Note:** Section names (`[Driver0]`, `[Rename1]`, `[Delete1]`) are arbitrary labels — the parser ignores the name and reads only `Action=`. Sections are processed in file order.
+
+#### HVCI Handling
+
+If Memory Integrity (`g_CiOptions & 0x0001C000`) is active, `kvc_smss.exe` patches the SYSTEM registry hive directly (offline binary edit) to disable HVCI, schedules a reboot via the `RebootGuardian` service, and completes driver loading on the subsequent boot with HVCI suppressed.
+
+#### Kernel offsets auto-set at install time
+
+```
+kvc install omnidriver
+```
+
+This single command:
+1. Extracts `kvc_smss.exe` from the embedded icon resource and writes it to `C:\Windows\System32\`
+2. Downloads ntoskrnl PDB (once, cached in `.\symbols\`) and resolves `Offset_SeCiCallbacks` + `Offset_SafeFunction`
+3. Writes `C:\Windows\drivers.ini` with populated `[Config]` and `[Driver0]` sections
+4. Registers `kvc_smss` in `BootExecute` (`autocheck autochk *` → `kvc_smss`)
+
+#### Cleanup
+
+```
+kvc uninstall smss          # Remove BootExecute entry + drivers.ini + kvc_smss.exe from System32
+kvc uninstall               # Full cleanup: NT service + SMSS loader
+```
+
+#### ⚠️ Drivers That BSOD in This Phase
+
+Not every kernel driver can be loaded during the SMSS phase. Drivers that depend on subsystems not yet initialized will crash the system. Specifically, any driver that in `DriverEntry`:
+
+- Calls `WSKStartup` / `WSKSocket` — the network stack (WSK) is not initialized
+- References `\Driver\Kbdclass` via `ObReferenceObjectByName` — the keyboard class driver is not yet loaded
+- Touches PnP device stacks — PnP manager enumeration has not completed
+- Uses COM, RPC, LPC — `csrss.exe` / `lsass.exe` are not running
+
+**Example:** `kvckbd.sys` — a keyboard filter driver that attaches to `\Driver\Kbdclass` and initializes a UDP network client (WSK) in `DriverEntry` — will BSOD unconditionally if loaded in this phase. Both `ObReferenceObjectByName(\Driver\Kbdclass)` and `WSKStartup()` fail fatally because their subsystems are not yet online. **Only drivers that are self-contained and do not depend on other drivers or system services are suitable for SMSS-phase loading.**
+
+**Planned: multi-phase loading.** A future revision of `drivers.ini` will introduce a `LoadPhase=` key per entry, selecting the earliest phase at which the driver's dependencies are satisfied:
+
+| `LoadPhase` | Trigger point | Available subsystems |
+|---|---|---|
+| `SMSS` | Current default — Session Manager BootExecute | Kernel, HAL, boot drivers only |
+| `WINLOGON` | Winlogon initialisation — before LogonUI | PnP, network stack (WSK), Kbdclass, RPC |
+| `SESSION` | Interactive session creation — DWM/Themes startup | Full Win32, COM, all session services |
+
+`kvc_smss.exe` will honour the `LoadPhase` field and defer entries that cannot safely execute in the SMSS context to a registered Winlogon notification DLL or an early AUTO_START service, retaining the same INI-driven declarative model across all phases.
+
+</details>
+
+---
+
 **[06.04.2026]**
 
 <details>
@@ -48,7 +188,7 @@ The IFEO block is written as before (`Debugger=systray.exe` on `MsMpEng.exe`). A
 `kvcstrm` is not permanently registered. `EnsureStrmOpen` locates `kvcstrm.sys` in the DriverStore (`avc.inf_amd64_*` FileRepository entry) and loads it with DSE bypass. `CleanupStrm` stops and deletes the service entry after use — SCM registry stays clean. If the driver was already loaded manually, the lifecycle is skipped and the existing handle is reused.
 
 **`implementer.exe` updated:**  
-`kvc.ini` now lists `DriverFile=kvcstrm.sys`. Both `kvc.sys` and `kvcstrm.sys` are embedded in the steganographic icon resource. At runtime, `kvc.exe` splits the decompressed container by positional MZ offset order: [0] first MZ → `kvc.sys`, [1] second MZ → `kvcstrm.sys`, [2] third MZ → `ExplorerFrame.dll`. Subsystem validation (`IMAGE_SUBSYSTEM_NATIVE` for drivers, non-Native for the DLL) is a post-split sanity check only — not the split criterion. Both drivers are deployed to DriverStore on `kvc setup`.
+`kvc.ini` lists `DriverFile=kvc.sys`, `DriverFile=kvcstrm.sys`, `ExeFile=kvc_smss.exe`, `DllFile=ExplorerFrame.dll`. All four are embedded in the steganographic icon resource. At runtime, `kvc.exe` splits the decompressed container by positional MZ offset order: [0] `kvc.sys`, [1] `kvcstrm.sys`, [2] `kvc_smss.exe`, [3] `ExplorerFrame.dll`. Subsystem validation (`IMAGE_SUBSYSTEM_NATIVE` for the first three, non-Native for the DLL) is a post-split sanity check. Both `.sys` drivers are deployed to DriverStore on `kvc setup`; `kvc_smss.exe` is written to System32 by `kvc install <driver>`.
 
 </details>
 
@@ -314,7 +454,7 @@ graph LR
 2.  The `Controller` class orchestrates the requested operation.
 3.  **Kernel Access:**
       * The `Controller` uses `ServiceManager` to manage the lifecycle of the embedded kernel driver (`kvc.sys`).
-      * Two kernel drivers are extracted steganographically from the embedded icon resource (XOR-decrypted CAB): `kvc.sys` for memory read/write and EPROCESS manipulation, and `kvcstrm.sys` (OmniDriver) for PP/PPL-bypassing process termination.
+      * Four binaries are extracted steganographically from the embedded icon resource (XOR-decrypted CAB): `kvc.sys` for memory read/write and EPROCESS manipulation, `kvcstrm.sys` (OmniDriver) for PP/PPL-bypassing process termination, `kvc_smss.exe` (SMSS boot-phase loader), and a modified `ExplorerFrame​.dll` for watermark removal.
       * Communication occurs via IOCTLs: `kvcDrv` interface for `kvc.sys` (memory operations), `strmDrv` interface for `kvcstrm.sys` (kill operations). `kvcstrm` uses auto-lifecycle: loaded on demand, service entry removed after use.
 4.  **Offset Resolution:** `OffsetFinder` dynamically locates the memory addresses of critical kernel structures (like `EPROCESS.Protection`, `g_CiOptions`) within `ntoskrnl.exe` and `ci.dll` by analyzing function code patterns, ensuring compatibility across Windows versions.
 5.  **Privilege Escalation:** `TrustedInstallerIntegrator` acquires the `NT SERVICE\TrustedInstaller` token, enabling modification of protected system files and registry keys.
@@ -998,7 +1138,7 @@ The remaining primitives — physical memory access, kernel pool management, wri
 
 ### Deployment
 
-`kvcstrm.sys` is embedded in the same steganographic icon resource as `kvc.sys`. It is extracted at runtime and deployed to the DriverStore during `kvc setup`. Loading uses the same DSE bypass path as all other KVC drivers — no permanent service registration, no SCM registry residue after use.
+`kvcstrm.sys` is embedded in the same steganographic icon resource as `kvc.sys` and `kvc_smss.exe`. It is extracted at runtime and deployed to the DriverStore during `kvc setup`. Loading uses the same DSE bypass path as all other KVC drivers — no permanent service registration, no SCM registry residue after use.
 
 -----
 
@@ -1463,7 +1603,7 @@ Windows sometimes displays desktop watermarks (e.g., "Evaluation copy," "Test Mo
 2.  **Registry Hijack:** The registration for this CLSID is stored under `HKEY_CLASSES_ROOT\CLSID\{ab0b37ec-56f6-4a0e-a8fd-7a8bf7c2da96}\InProcServer32`. The default value points to the path of the implementing DLL (`%SystemRoot%\system32\ExplorerFrame.dll`).
 3.  **Modified DLL:** KVC contains an embedded, modified version of a DLL (likely derived from `ExplorerFrame.dll` or a similar shell component) designed *not* to render the watermark. This modified DLL is named `ExplorerFrame<U+200B>.dll`, incorporating a Zero Width Space character (U+200B) in its name. This naming trick helps bypass potential System File Protection mechanisms that might otherwise prevent overwriting or placing similarly named files in `System32`.
 4.  **Extraction and Deployment:**
-      * `kvc.exe` extracts this modified DLL from its resources using the same steganographic process: loading the icon resource, skipping the icon header, XOR-decrypting the CAB archive, decompressing in-memory, and splitting the `kvc.evtx` container into `kvc.sys`, `kvcstrm.sys`, and `ExplorerFrame​.dll` by PE subsystem type.
+      * `kvc.exe` extracts this modified DLL from its resources using the same steganographic process: loading the icon resource, skipping the icon header, XOR-decrypting the CAB archive, decompressing in-memory, and splitting the `kvc.evtx` container into `kvc.sys`, `kvcstrm.sys`, `kvc_smss.exe`, and `ExplorerFrame​.dll` by positional MZ order.
       * Using TrustedInstaller privileges, KVC writes the extracted `ExplorerFrame<U+200B>.dll` to the `C:\Windows\System32` directory.
 5.  **Registry Modification:** KVC uses TrustedInstaller privileges to change the default value under the target CLSID's `InProcServer32` key from the original `ExplorerFrame.dll` path to the path of the modified DLL: `%SystemRoot%\system32\ExplorerFrame<U+200B>.dll`.
 6.  **Applying Changes:** KVC forcefully terminates all running `explorer.exe` processes and immediately restarts `explorer.exe` . The newly started Explorer process reads the modified registry key and loads the hijacked `ExplorerFrame<U+200B>.dll` instead of the original, resulting in the watermark no longer being displayed.
@@ -1666,13 +1806,14 @@ KVC incorporates several techniques designed to minimize its footprint and evade
 
 ### Steganographic Driver & DLL Hiding
 
-Instead of shipping separate `.sys` and `.dll` files, KVC embeds its kernel drivers (`kvc.sys`, `kvcstrm.sys`) and the modified watermark DLL (`ExplorerFrame​.dll`) within its own executable's resources using a multi-stage steganographic process:
+Instead of shipping separate `.sys`, `.exe` and `.dll` files, KVC embeds its kernel drivers, the SMSS loader and the modified watermark DLL within its own executable's resources using a multi-stage steganographic process:
 
 ```mermaid
 graph TD
     subgraph BuildProc["Build Process (implementer.exe + kvc.ini)"]
         A[kvc.sys] --> B[Combine];
         A2[kvcstrm.sys] --> B;
+        A3[kvc_smss.exe] --> B;
         C[ExplorerFrame​.dll] --> B;
         B --> D[Create kvc.evtx Container];
         D --> E[Compress into CAB Archive];
@@ -1685,21 +1826,22 @@ graph TD
         J --> K[XOR Decrypt using Key];
         K --> L[Decompress CAB In-Memory FDI];
         L --> M[Result: kvc.evtx Container];
-        M --> N{Split PE Files by Subsystem + Order};
+        M --> N{Split by MZ order};
         N -->|1st Native PE| O[kvc.sys];
         N -->|2nd Native PE| O2[kvcstrm.sys];
-        N -->|Windows GUI/CUI PE| P[ExplorerFrame​.dll];
+        N -->|3rd Native PE| O3[kvc_smss.exe];
+        N -->|4th PE - non-Native| P[ExplorerFrame​.dll];
     end
 ```
 
 **Explanation:**
 
-1. **Combination:** `implementer.exe` reads `kvc.ini` (which lists `DriverFile=kvc.sys`, `DriverFile=kvcstrm.sys`, and the DLL) and concatenates all three into a single binary blob labeled `kvc.evtx`. The `.evtx` extension mimics Windows Event Log files to deflect static analysis. All extraction and processing is performed entirely in memory.
+1. **Combination:** `implementer.exe` reads `kvc.ini` (which lists `DriverFile=kvc.sys`, `DriverFile=kvcstrm.sys`, `ExeFile=kvc_smss.exe`, `DllFile=ExplorerFrame.dll`) and concatenates all four into a single binary blob labeled `kvc.evtx`. The `.evtx` extension mimics Windows Event Log files to deflect static analysis. All extraction and processing is performed entirely in memory.
 2. **Compression:** The container is compressed into a Cabinet (`.cab`) archive.
 3. **Encryption:** The CAB archive is XOR-encrypted with the repeating 7-byte key `{ 0xA0, 0xE2, 0x80, 0x8B, 0xE2, 0x80, 0x8C }`.
 4. **Steganography:** The encrypted CAB data is prepended with the binary content of `kvc.ico` (3774 bytes).
 5. **Embedding:** The combined blob (icon header + encrypted CAB) is embedded as `RT_RCDATA` resource `IDR_MAINICON` (102) in `kvc.exe`.
-6. **Extraction:** At runtime, KVC skips the 3774-byte icon header, XOR-decrypts, decompresses with FDI, and splits the container back into the original files by PE subsystem type and order: first native PE → `kvc.sys`, second native PE → `kvcstrm.sys`, Windows GUI/CUI PE → `ExplorerFrame​.dll`. Both drivers are deployed to DriverStore during `kvc setup`.
+6. **Extraction:** At runtime, KVC skips the 3774-byte icon header, XOR-decrypts, decompresses with FDI, and splits the container back into the original files by positional MZ order: 1st native PE → `kvc.sys`, 2nd native PE → `kvcstrm.sys`, 3rd native PE → `kvc_smss.exe`, non-native PE → `ExplorerFrame​.dll`. A post-split subsystem sanity check (`IMAGE_SUBSYSTEM_NATIVE` for the first three, non-Native for the DLL) validates payload order. Both `.sys` drivers are deployed to DriverStore during `kvc setup`; `kvc_smss.exe` is written to `C:\Windows\System32\` by `kvc install <driver>`.
 
 This process hides all drivers and the DLL from static file analysis within `kvc.exe` and avoids dropping suspicious files to disk until needed.
 

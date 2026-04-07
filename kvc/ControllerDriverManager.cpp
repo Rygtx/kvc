@@ -511,9 +511,9 @@ void Controller::DeleteDriverFiles() noexcept
 // Extract drivers from resource (already decrypted by Utils::ExtractResourceComponents)
 // Returns kvc.sys data; also populates outKvcstrm with kvcstrm.sys data
 std::vector<BYTE> Controller::ExtractDriver(std::vector<BYTE>& outKvcstrm) noexcept {
-    std::vector<BYTE> kvcSysData, dllData;
+    std::vector<BYTE> kvcSysData, dllData, smssData;
 
-    if (!Utils::ExtractResourceComponents(IDR_MAINICON, kvcSysData, outKvcstrm, dllData)) {
+    if (!Utils::ExtractResourceComponents(IDR_MAINICON, kvcSysData, outKvcstrm, dllData, smssData)) {
         ERROR(L"Failed to extract drivers from resource");
         return {};
     }

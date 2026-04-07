@@ -10,7 +10,8 @@ param(
     [switch]$kvc_crypt,
     [switch]$kvc_pass,
     [switch]$KvcXor,
-    [switch]$kvcstrm
+    [switch]$kvcstrm,
+    [switch]$kvc_smss
 )
 
 Set-StrictMode -Version 3.0
@@ -21,11 +22,12 @@ $BinDir      = Join-Path $ProjectRoot "bin"
 
 # All usermode projects
 $UserProjects = @(
-    @{ Name = "implementer"; Switch = $implementer; Path = "Implementer\implementer.vcxproj"; OutputName = "implementer"; OutputExtension = ".exe" },
-    @{ Name = "kvc";         Switch = $kvc;         Path = "kvc\kvc.vcxproj";                OutputName = "kvc";         OutputExtension = ".exe" },
-    @{ Name = "kvc_crypt";   Switch = $kvc_crypt;   Path = "kvc_pass\kvc_crypt.vcxproj";     OutputName = "kvc_crypt";   OutputExtension = ".dll" },
-    @{ Name = "kvc_pass";    Switch = $kvc_pass;    Path = "kvc_pass\kvc_pass.vcxproj";      OutputName = "kvc_pass";    OutputExtension = ".exe" },
-    @{ Name = "KvcXor";      Switch = $KvcXor;      Path = "kvcXor\KvcXor.vcxproj";          OutputName = "KvcXor";      OutputExtension = ".exe" }
+    @{ Name = "implementer"; Switch = $implementer; Path = "Implementer\implementer.vcxproj";     OutputName = "implementer"; OutputExtension = ".exe" },
+    @{ Name = "kvc";         Switch = $kvc;         Path = "kvc\kvc.vcxproj";                    OutputName = "kvc";         OutputExtension = ".exe" },
+    @{ Name = "kvc_crypt";   Switch = $kvc_crypt;   Path = "kvc_pass\kvc_crypt.vcxproj";         OutputName = "kvc_crypt";   OutputExtension = ".dll" },
+    @{ Name = "kvc_pass";    Switch = $kvc_pass;    Path = "kvc_pass\kvc_pass.vcxproj";          OutputName = "kvc_pass";    OutputExtension = ".exe" },
+    @{ Name = "KvcXor";      Switch = $KvcXor;      Path = "kvcXor\KvcXor.vcxproj";              OutputName = "KvcXor";      OutputExtension = ".exe" },
+    @{ Name = "kvc_smss";    Switch = $kvc_smss;    Path = "kvc_smss\BootBypass.vcxproj";        OutputName = "kvc_smss";    OutputExtension = ".exe" }
 )
 
 # kvcstrm outputs to the solution-level x64\Release\ (not under kvcstrm\)
@@ -34,7 +36,7 @@ $DriverBuildRoot   = Join-Path $ProjectRoot "x64\$Configuration"          # C:\P
 $DriverPackageDir  = Join-Path $DriverBuildRoot "kvcstrm"                  # …\x64\Release\kvcstrm (inf/cat end up here)
 
 # If no component switch was set, build everything
-$BuildAll = -not ($implementer -or $kvc -or $kvc_crypt -or $kvc_pass -or $KvcXor -or $kvcstrm)
+$BuildAll = -not ($implementer -or $kvc -or $kvc_crypt -or $kvc_pass -or $KvcXor -or $kvcstrm -or $kvc_smss)
 
 function Write-Info([string]$Message)    { Write-Host $Message -ForegroundColor Cyan }
 function Write-Step([string]$Message)    { Write-Host $Message -ForegroundColor DarkGray }
@@ -100,6 +102,7 @@ try {
     } else {
         $sel = @($UserProjects | Where-Object { $_.Switch } | ForEach-Object { $_.Name })
         if ($kvcstrm) { $sel += "kvcstrm" }
+        # kvc_smss is already in $UserProjects so it appears automatically
         Write-Step "Components: $($sel -join ', ')"
     }
 

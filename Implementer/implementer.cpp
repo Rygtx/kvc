@@ -305,7 +305,7 @@ Result<Config> read_config(const std::string& config_path) {
             std::string key = trim(line.substr(0, pos));
             std::string value = trim(line.substr(pos + 1));
 
-            if (key == "DriverFile" || key == "DllFile" || key == "PayloadFile") {
+            if (key == "DriverFile" || key == "DllFile" || key == "PayloadFile" || key == "ExeFile") {
                 auto files = split_list(value);
                 config.payload_files.insert(
                     config.payload_files.end(),

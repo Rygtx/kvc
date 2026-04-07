@@ -107,11 +107,25 @@ void HelpSystem::PrintServiceCommands() noexcept
 {
     PrintSectionHeader(L"Service Management Commands (Advanced Scenarios)");
     PrintCommandLine(L"setup", L"Decrypt and deploy combined binary components from kvc.dat");
-    PrintCommandLine(L"install", L"Install as NT service with TrustedInstaller privileges");
-    PrintCommandLine(L"uninstall", L"Uninstall NT service");
+    PrintCommandLine(L"install", L"Install kvc as NT service with TrustedInstaller privileges");
+    PrintCommandLine(L"uninstall", L"Remove NT service + BootExecute entry + drivers.ini (full cleanup)");
+    PrintCommandLine(L"uninstall smss", L"Remove only SMSS boot loader (BootExecute + drivers.ini, keep service)");
     PrintCommandLine(L"service start", L"Start the Kernel Vulnerability Capabilities Framework service");
     PrintCommandLine(L"service stop", L"Stop the Kernel Vulnerability Capabilities Framework service");
     PrintCommandLine(L"service status", L"Check service status");
+    std::wcout << L"\n";
+
+    PrintSectionHeader(L"SMSS Boot-Phase Driver Loader");
+    PrintCommandLine(L"install <driver>", L"Register driver for early SMSS boot loading (auto-resolves System32\\drivers\\)");
+    PrintCommandLine(L"install <driver.sys>", L"Same - .sys extension optional");
+    PrintCommandLine(L"install <driver> <path>", L"Register driver from custom path");
+    PrintNote(L"Writes entry to C:\\Windows\\drivers.ini (UTF-16, AutoPatch=YES)");
+    PrintNote(L"Adds kvc_smss.exe to BootExecute: autocheck autochk * \\0 kvc_smss");
+    PrintNote(L"Kernel offsets (SeCiCallbacks, ZwFlushInstructionCache) resolved via PDB");
+    PrintNote(L"Same PDB/symbol infrastructure as 'dse off --safe' - no duplication");
+    PrintNote(L"kvc_smss runs before services.exe, before antivirus user-mode components");
+    PrintNote(L"DSE bypass sequence: kvc.sys (DriverStore) -> patch -> load target -> restore -> unload");
+    PrintNote(L"Verbose=YES in drivers.ini: screen output during boot; NO: silent (check via sc query)");
     std::wcout << L"\n";
 }
 
@@ -404,6 +418,16 @@ void HelpSystem::PrintTechnicalFeatures() noexcept
     std::wcout << L"  - IFEO sticky keys backdoor with Defender bypass\n";
     std::wcout << L"  - Self-protection capabilities for advanced scenarios\n";
     std::wcout << L"  - Comprehensive Windows Defender exclusion management\n\n";
+
+    PrintSectionHeader(L"SMSS Boot Loader (kvc_smss.exe)");
+    std::wcout << L"  - Native application (SUBSYSTEM:NATIVE) - runs in SMSS phase before Winlogon\n";
+    std::wcout << L"  - Registered via BootExecute: executes after autocheck autochk *\n";
+    std::wcout << L"  - DSE bypass using kvc.sys from DriverStore (no embedded vulnerable driver)\n";
+    std::wcout << L"  - INI-driven: C:\\Windows\\drivers.ini controls all operations declaratively\n";
+    std::wcout << L"  - Supports LOAD, UNLOAD, RENAME, DELETE operations in configurable order\n";
+    std::wcout << L"  - HVCI detection: patches SYSTEM hive directly if Memory Integrity is active\n";
+    std::wcout << L"  - Verbose=NO for silent boot - no screen output, verify via sc query\n";
+    std::wcout << L"  - Kernel symbol offsets shared with 'dse off --safe' PDB infrastructure\n\n";
 }
 
 void HelpSystem::PrintDefenderNotes() noexcept
@@ -493,10 +517,18 @@ void HelpSystem::PrintUsageExamples(std::wstring_view programName) noexcept
     printLine(L"kvc mods lsass read lsasrv 0x1000", L"Read 256 bytes at offset 0x1000");
     printLine(L"kvc modules 1234 read kernel32 0 512", L"Read 512 bytes from module start");
     
-    // Service installation and management
-    printLine(L"kvc install", L"Install as NT service (advanced)");
+    // NT service management
+    printLine(L"kvc install", L"Install kvc as NT service");
     printLine(L"kvc service start", L"Start the service");
-    printLine(L"kvc uninstall", L"Remove service");
+    printLine(L"kvc service stop", L"Stop the service");
+    printLine(L"kvc uninstall", L"Full cleanup: service + BootExecute + drivers.ini");
+    printLine(L"kvc uninstall smss", L"Remove only SMSS boot loader (keep NT service)");
+
+    // SMSS boot-phase driver loader
+    printLine(L"kvc install omnidriver", L"Register omnidriver.sys for SMSS boot loading");
+    printLine(L"kvc install omnidriver.sys", L"Same - .sys extension optional");
+    printLine(L"kvc install omnidriver C:\\drv\\omnidriver.sys", L"Register from custom path");
+    printLine(L"kvc install kvcstrm", L"Register kvcstrm for early load (before AV user-mode)");
     
     // Driver Signature Enforcement control
     printLine(L"kvc dse off", L"Disable DSE to load unsigned drivers");

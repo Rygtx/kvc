@@ -74,6 +74,7 @@ public:
     
     std::optional<ULONG_PTR> GetKernelModuleBase(const char* moduleName) noexcept;
     ULONG_PTR FindCiOptions(ULONG_PTR ciBase) noexcept;
+    std::optional<std::pair<DWORD64, std::wstring>> GetKernelInfo() noexcept;
 
     // ========================================================================
     // HVCI DETECTION
@@ -117,8 +118,7 @@ private:
     bool DisableSafe() noexcept;
     bool RestoreSafe() noexcept;
     
-    // Kernel information for Safe method
-    std::optional<std::pair<DWORD64, std::wstring>> GetKernelInfo() noexcept;
+    // Kernel information helper
     std::wstring GetCurrentLCUVersion() noexcept;
     
     // Patch operations

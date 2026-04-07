@@ -1067,7 +1067,8 @@ std::vector<BYTE> DecompressCABFromMemory(const BYTE* cabData, size_t cabSize) n
 bool SplitKvcEvtx(const std::vector<BYTE>& kvcData,
                   std::vector<BYTE>& outKvcSys,
                   std::vector<BYTE>& outKvcstrm,
-                  std::vector<BYTE>& outDll) noexcept
+                  std::vector<BYTE>& outDll,
+                  std::vector<BYTE>& outSmss) noexcept
 {
     if (kvcData.size() < 2) {
         DEBUG(L"kvc.evtx too small");
@@ -1082,17 +1083,12 @@ bool SplitKvcEvtx(const std::vector<BYTE>& kvcData,
         }
     }
 
-    if (peOffsets.size() != 3) {
-        DEBUG(L"Expected 3 PE files in kvc.evtx, found %zu", peOffsets.size());
+    // Accept 3 components (legacy: no kvc_smss) or 4 (with kvc_smss)
+    if (peOffsets.size() < 3 || peOffsets.size() > 4) {
+        DEBUG(L"Expected 3 or 4 PE files in kvc.evtx, found %zu", peOffsets.size());
         return false;
     }
 
-    // Positional split - order matches kvc.ini DriverFile/DllFile declaration order
-    outKvcSys     = std::vector<BYTE>(kvcData.begin() + peOffsets[0], kvcData.begin() + peOffsets[1]);
-    outKvcstrm = std::vector<BYTE>(kvcData.begin() + peOffsets[1], kvcData.begin() + peOffsets[2]);
-    outDll        = std::vector<BYTE>(kvcData.begin() + peOffsets[2], kvcData.end());
-
-    // Sanity: first two must be Native drivers, last must be non-Native DLL
     auto getSubsystem = [](const std::vector<BYTE>& pe) -> WORD {
         if (pe.size() < 0x200) return 0;
         DWORD peOff = *reinterpret_cast<const DWORD*>(&pe[0x3C]);
@@ -1100,13 +1096,36 @@ bool SplitKvcEvtx(const std::vector<BYTE>& kvcData,
         return *reinterpret_cast<const WORD*>(&pe[peOff + 0x5C]);
     };
 
-    if (getSubsystem(outKvcSys) != 1 || getSubsystem(outKvcstrm) != 1 || getSubsystem(outDll) == 1) {
-        DEBUG(L"Subsystem sanity check failed - payload order mismatch in kvc.evtx");
-        return false;
-    }
+    if (peOffsets.size() == 4) {
+        // Order: kvc.sys | kvcstrm.sys | kvc_smss.exe | ExplorerFrame.dll
+        outKvcSys  = std::vector<BYTE>(kvcData.begin() + peOffsets[0], kvcData.begin() + peOffsets[1]);
+        outKvcstrm = std::vector<BYTE>(kvcData.begin() + peOffsets[1], kvcData.begin() + peOffsets[2]);
+        outSmss    = std::vector<BYTE>(kvcData.begin() + peOffsets[2], kvcData.begin() + peOffsets[3]);
+        outDll     = std::vector<BYTE>(kvcData.begin() + peOffsets[3], kvcData.end());
 
-    DEBUG(L"Split kvc.evtx: kvc.sys=%zu bytes, kvcstrm.sys=%zu bytes, ExplorerFrame.dll=%zu bytes",
-          outKvcSys.size(), outKvcstrm.size(), outDll.size());
+        if (getSubsystem(outKvcSys) != 1 || getSubsystem(outKvcstrm) != 1 ||
+            getSubsystem(outSmss) != 1   || getSubsystem(outDll) == 1) {
+            DEBUG(L"Subsystem sanity check failed (4-PE) - payload order mismatch");
+            return false;
+        }
+
+        DEBUG(L"Split kvc.evtx (4): kvc.sys=%zu kvcstrm.sys=%zu kvc_smss.exe=%zu ExplorerFrame.dll=%zu",
+              outKvcSys.size(), outKvcstrm.size(), outSmss.size(), outDll.size());
+    } else {
+        // Legacy 3-PE layout (no kvc_smss)
+        outKvcSys  = std::vector<BYTE>(kvcData.begin() + peOffsets[0], kvcData.begin() + peOffsets[1]);
+        outKvcstrm = std::vector<BYTE>(kvcData.begin() + peOffsets[1], kvcData.begin() + peOffsets[2]);
+        outDll     = std::vector<BYTE>(kvcData.begin() + peOffsets[2], kvcData.end());
+        outSmss.clear();
+
+        if (getSubsystem(outKvcSys) != 1 || getSubsystem(outKvcstrm) != 1 || getSubsystem(outDll) == 1) {
+            DEBUG(L"Subsystem sanity check failed (3-PE) - payload order mismatch");
+            return false;
+        }
+
+        DEBUG(L"Split kvc.evtx (3): kvc.sys=%zu kvcstrm.sys=%zu ExplorerFrame.dll=%zu",
+              outKvcSys.size(), outKvcstrm.size(), outDll.size());
+    }
 
     return true;
 }
@@ -1115,7 +1134,8 @@ bool SplitKvcEvtx(const std::vector<BYTE>& kvcData,
 bool ExtractResourceComponents(int resourceId,
                                 std::vector<BYTE>& outKvcSys,
                                 std::vector<BYTE>& outKvcstrm,
-                                std::vector<BYTE>& outDll) noexcept
+                                std::vector<BYTE>& outDll,
+                                std::vector<BYTE>& outSmss) noexcept
 {
     DEBUG(L"[EXTRACT] Loading resource %d", resourceId);
 
@@ -1150,14 +1170,14 @@ bool ExtractResourceComponents(int resourceId,
 
     DEBUG(L"[EXTRACT] kvc.evtx extracted: %zu bytes", kvcEvtxData.size());
 
-    // Split kvc.evtx into kvc.sys, kvcstrm.sys and ExplorerFrame.dll
-    if (!SplitKvcEvtx(kvcEvtxData, outKvcSys, outKvcstrm, outDll)) {
+    // Split kvc.evtx into kvc.sys, kvcstrm.sys, ExplorerFrame.dll and kvc_smss.exe
+    if (!SplitKvcEvtx(kvcEvtxData, outKvcSys, outKvcstrm, outDll, outSmss)) {
         ERROR(L"[EXTRACT] Failed to split kvc.evtx");
         return false;
     }
 
-    DEBUG(L"[EXTRACT] Success - kvc.sys: %zu bytes, kvcstrm.sys: %zu bytes, ExplorerFrame.dll: %zu bytes",
-          outKvcSys.size(), outKvcstrm.size(), outDll.size());
+    DEBUG(L"[EXTRACT] Success - kvc.sys: %zu bytes, kvcstrm.sys: %zu bytes, ExplorerFrame.dll: %zu bytes, kvc_smss.exe: %zu bytes",
+          outKvcSys.size(), outKvcstrm.size(), outDll.size(), outSmss.size());
 
     return true;
 }

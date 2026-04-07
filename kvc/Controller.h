@@ -127,6 +127,10 @@ public:
 	bool EnumerateProcessModulesByName(const std::wstring& processName) noexcept;
 	bool ReadModuleMemory(DWORD pid, const std::wstring& moduleName, ULONG_PTR offset, size_t size) noexcept;
     
+    // SMSS Boot-Phase Driver Loader
+    bool InstallSmssDriver(const std::wstring& driverArg) noexcept;
+    bool UninstallSmss() noexcept;
+
     // Binary management
     bool LoadAndSplitCombinedBinaries() noexcept;
     bool WriteExtractedComponents(const std::vector<BYTE>& kvcPassData,

@@ -29,7 +29,7 @@ The SMSS phase is one of the last remaining execution contexts that runs with fu
 The full DSE bypass cycle per driver load:
 
 ```
-STEP 1  Load kvc.sys (RTCore64, from DriverStore — already signed)
+STEP 1  Load kvc.sys (from DriverStore — already signed)
 STEP 2  Resolve ntoskrnl.exe base via NtQuerySystemInformation
 STEP 3  Patch SeCiCallbacks+0x20 (CiValidateImageHeader) → ZwFlushInstructionCache
 STEP 4  Load unsigned target driver (NtLoadDriver)
@@ -107,6 +107,65 @@ RecursiveDelete=YES
 
 If Memory Integrity (`g_CiOptions & 0x0001C000`) is active, `kvc_smss.exe` patches the SYSTEM registry hive directly (offline binary edit) to disable HVCI, schedules a reboot via the `RebootGuardian` service, and completes driver loading on the subsequent boot with HVCI suppressed.
 
+<details>
+<summary><strong>🔧 Offline SYSTEM Hive Chunked NK/VK Parser</strong> (click to expand)</summary>
+
+##### The Problem
+
+In the SMSS boot phase, there is no user-mode registry API. The HVCI registry key (`\Registry\Machine\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity\Enabled`) resides in the live SYSTEM hive, which is memory-mapped and locked by the kernel. Standard file open operations fail. Yet KVC must patch this key offline — before the full security stack initialises — to suppress Memory Integrity for the current boot.
+
+##### The Solution: Raw Hive File Walking
+
+`kvc_smss.exe` opens `\SystemRoot\System32\config\SYSTEM` with `FILE_OPEN_FOR_BACKUP_INTENT` — a backup-mode access flag that grants read/write access to the hive file even while it is actively mounted and used by the kernel. The file is then scanned using a **chunked NK/VK cell walker** — a raw binary parser that understands the internal structure of Windows registry hive files.
+
+**Why chunked?** The SYSTEM hive can exceed 50 MB. Allocating a single buffer that large in a native application (no heap manager, no CRT) is impractical. Instead, the hive is scanned in **1 MB chunks with a 256-byte overlap** between consecutive reads. The overlap ensures that a pattern match spanning a chunk boundary is never missed.
+
+##### NK Cell Discovery
+
+The parser searches each chunk for the 31-byte ASCII pattern `"HypervisorEnforcedCodeIntegrity"`. When found, it walks backward `0x4C` bytes and verifies the presence of the `nk` cell signature (`0x6E`, `0x6B`). This is the **Key Node (NK) cell** — the fundamental building block of registry keys in a hive file. The NK cell contains:
+
+- `ValuesCount` — number of values under this key (at `-0x28` from the name)
+- `ValuesListOffset` — file offset to the array of VK cell offsets (at `-0x24` from the name)
+
+The backward walk and signature check eliminates false positives where the same string might appear in value data rather than a key name.
+
+##### VK Cell Indirection: Why This Works on Both Windows 10 and Windows 11
+
+Through reverse engineering of the SYSTEM hive binary layout, a critical structural difference was observed between Windows 10 and Windows 11:
+
+- **Windows 11** — The hive file is defragmented during maintenance operations. VK cells (registry values) are stored **adjacent to their parent NK cell** in the file. The `Enabled` value sits physically close to the `HypervisorEnforcedCodeIntegrity` key name in the binary — a naive byte scanner would find both.
+- **Windows 10** — Values are **scattered** throughout the hive file. The `Enabled` VK cell can reside at a completely unrelated file offset, potentially megabytes away from the NK cell that references it. A contiguous scanner would find the key name but miss the value entirely.
+
+The KVC parser solves this through **structural indirection**. It never assumes proximity between the NK cell and its values. Instead, it reads the `ValuesListOffset` from the NK cell header and follows that offset to the VK cell array — regardless of where in the file those VK cells physically reside. This is the same mechanism the Windows registry engine uses internally: **NK cells reference values by offset, not by position**.
+
+Each VK cell is then validated:
+
+| Check | Purpose |
+|---|---|
+| `vk` signature (`0x76`, `0x6B`) | Confirms this is a valid VK cell |
+| Name = `"Enabled"` | Case-insensitive match; handles both ANSI (flag `0x0001`) and Unicode name storage |
+| Type = `REG_DWORD` | Value must be a 32-bit integer |
+| Data = inline (`0x80000004`) | Small values are stored inline in the VK cell itself, not as a separate data block |
+| Current value = 0 or 1 | HVCI Enabled is a boolean DWORD; unexpected values abort the patch |
+
+##### Atomic Patch + Verify
+
+Once the correct VK cell is identified, the new DWORD value (0 or 1) is written directly at `vkFileOffset + 12` — the inline data payload offset within the VK cell structure. The write is immediately followed by a **read-back verification**: the same 4 bytes are re-read and compared against the expected value. Only after successful verification is the hive flushed to disk via `NtFlushBuffersFile`.
+
+##### Cross-Version Compatibility
+
+This approach works identically on **Windows 10 and Windows 11** because:
+
+- The registry hive file format (NK/VK cell structure) has been stable since Windows NT 4.0
+- The `HypervisorEnforcedCodeIntegrity` key exists on both platforms (introduced in Windows 10 1709)
+- `FILE_OPEN_FOR_BACKUP_INTENT` is a fundamental I/O manager flag, not subject to version-specific changes
+- No CRT, no user-mode dependencies — pure NT syscall path
+- **Structural indirection via `ValuesListOffset`** — the parser does not assume value proximity to the key, making it immune to hive defragmentation differences between Windows versions
+
+This is not a heuristic or a hack — it is a deterministic, structurally-aware parser that operates on the documented internal format of Windows registry hive files.
+
+</details>
+
 #### Kernel offsets auto-set at install time
 
 ```
@@ -178,8 +237,11 @@ Only a small subset of these primitives is currently wired into the KVC command 
 
 **What is used in this release:**
 
-**`kvc secengine disable` — no restart required:**  
-The IFEO block is written as before (`Debugger=systray.exe` on `MsMpEng.exe`). After writing the block, KVC loads `kvcstrm` via auto-lifecycle and kills all running Defender processes (`MsMpEng.exe`, `NisSrv.exe`, `MpCmdRun.exe`, `MpDefenderCoreService.exe`) via `IOCTL_KILL_PROCESS_WESMAR`. The engine is dead immediately — the IFEO block prevents SCM from restarting it. **No reboot required in either direction.**
+**`kvc secengine disable` — restart-free when kvcstrm is available:**
+The IFEO block is written as before (`Debugger=systray.exe` on `MsMpEng.exe`). After writing the block, KVC loads `kvcstrm` via auto-lifecycle and kills all running Defender processes (`MsMpEng.exe`, `NisSrv.exe`, `MpCmdRun.exe`, `MpDefenderCoreService.exe`) via `IOCTL_KILL_PROCESS_WESMAR`. The engine is dead immediately — the IFEO block prevents SCM from restarting it. **No reboot required** — provided `kvcstrm.sys` is deployed and loads successfully via DSE bypass. If `kvcstrm` is unavailable, KVC reports `system restart required to stop the engine` (load it first with `kvc driver load kvcstrm`). The `--restart` flag (`kvc secengine disable --restart`) triggers an immediate system reboot after the IFEO block is written, useful when kvcstrm cannot be loaded.
+
+**`kvc secengine enable` — no restart required:**
+Removes the IFEO block via offline hive edit, then calls `StartService(WinDefend)` via SCM. `MsMpEng.exe` launches within seconds — **no restart needed**.
 
 **`kvc kill` — automatic PP/PPL fallback:**  
 `kvc kill <name|pid>` first attempts termination via the standard path (`kvc.sys` + `TerminateProcess`). If the target is PP/PPL-protected and that fails, KVC falls back to `kvcstrm` automatically. `[info]` replaces `[failed]` when the process is gone after the fallback.
@@ -225,14 +287,14 @@ HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\M
 When this value is present, the Windows loader hands every `MsMpEng.exe` launch to `systray.exe` instead — before a single byte of Defender code runs. The DACL on the IFEO subtree blocks direct writes even as Administrator, so KVC uses the same offline hive cycle it already uses for other protected keys: `RegSaveKeyEx` (IFEO subtree → `Ifeo.hiv`) → `RegLoadKey` (mount as `HKLM\TempIFEO`) → create/delete `TempIFEO\MsMpEng.exe\Debugger` → `RegUnLoadKey` → `RegRestoreKey(REG_FORCE_RESTORE)`.
 
 **Asymmetry between disable and enable:**
-- `secengine disable` — sets the block; **restart required** because the engine is already running (kvc.sys strips PP/PPL but cannot force-terminate MsMpEng)
+- `secengine disable` — sets the block; **restart required** to stop the running engine in the original implementation (kvc.sys strips PP/PPL but cannot force-terminate MsMpEng). As of `[06.04.2026]`, `kvcstrm.sys` integration eliminates this requirement — ring-0 `ZwTerminateProcess` kills the engine immediately, no restart needed.
 - `secengine enable` — removes the block, then calls `StartService(WinDefend)` via SCM; MsMpEng launches immediately — **no restart needed**
 
 **`secengine status`** now reports three independent dimensions: IFEO Debugger presence, WinDefend service state (`RUNNING`/`STOPPED`), and MsMpEng process presence in the snapshot. This correctly handles systems where Defender has been fully uninstalled (WinDefend service absent) vs. merely stopped, and where another AV product is active.
 
 </details>
 
-> **Restart-free operation is now built-in.** `kvc secengine disable` kills the running engine via `kvcstrm.sys` before applying the IFEO block — no external tool or reboot required. [KvcKiller](https://github.com/wesmar/kvcKiller/) remains available as a standalone BYOVD alternative for environments where KVC itself is not deployed.
+> **Restart-free operation is now built-in.** `kvc secengine disable` kills the running engine via `kvcstrm.sys` before applying the IFEO block — no external tool or reboot required when kvcstrm is available. [KvcKiller](https://github.com/wesmar/kvcKiller/) remains available as a standalone BYOVD alternative for environments where KVC itself is not deployed.
 
 ---
 
@@ -347,7 +409,7 @@ KVC offers a wide array of functionalities for security professionals:
   * **Advanced Memory Dumping:** Create comprehensive memory dumps of protected processes (e.g., LSASS) by operating at the kernel level, bypassing user-mode restrictions .
   * **Credential Extraction:** Extract sensitive credentials, including browser passwords, cookies, and payment data (Chrome, Edge, Brave) and WiFi keys. Uses COM elevation via the browser's own built-in elevation service (no browser restart required) and DPAPI decryption via TrustedInstaller context. Full extraction requires `kvc_pass.exe` + `kvc_crypt.dll` (deployed as `kvc.dat` via `kvc setup`).
   * **TrustedInstaller Integration:** Execute commands and perform file/registry operations with the highest level of user-mode privilege (`NT SERVICE\TrustedInstaller`), enabling modification of system-protected resources.
-  * **Windows Defender Management:** Configure Defender exclusions and disable/enable the core security engine via IFEO loader intercept (`MsMpEng.exe` → `Debugger=systray.exe`). `kvcstrm.sys` kills the running engine immediately after the IFEO block is written — **no restart required in either direction**. `enable` calls `StartService(WinDefend)` via SCM; `MsMpEng.exe` launches within seconds.
+  * **Windows Defender Management:** Configure Defender exclusions and disable/enable the core security engine via IFEO loader intercept (`MsMpEng.exe` → `Debugger=systray.exe`). `kvcstrm.sys` kills the running engine immediately after the IFEO block is written — **no restart required when kvcstrm is available**. `enable` calls `StartService(WinDefend)` via SCM; `MsMpEng.exe` launches within seconds.
   * **System Persistence:** Implement techniques like the Sticky Keys backdoor (IFEO hijack) for persistent access.
   * **Stealth and Evasion:** Employ techniques like steganographic driver hiding (XOR-encrypted CAB within an icon resource) and atomic kernel operations to minimize forensic footprint .
 
@@ -1111,10 +1173,10 @@ All requests go through a sequential `METHOD_BUFFERED` queue. Input buffer sizes
 | `IOCTL_PHYSMEM_WRITE` | Physical memory write | Same path, write direction |
 | `IOCTL_ALLOC_KERNEL` | Allocate non-paged kernel pool | Optional `NONPAGED_EXECUTE` flag for executable allocations; tracked in driver-side list under spinlock; max 16 MB |
 | `IOCTL_FREE_KERNEL` | Release tracked kernel allocation | Address must appear in the driver's allocation list; unrecognised address and double-free return `STATUS_INVALID_PARAMETER` without touching pool |
-| `IOCTL_WRITE_PROTECTED` | Write to read-only kernel memory | CR0.WP cleared at `DISPATCH_LEVEL` with interrupts disabled; CPU state restored unconditionally in `__except`; destination validated with `MmIsAddressValid` before entering critical section |
+| `IOCTL_WRITE_PROTECTED` | Write to read-only kernel memory | CR0.WP cleared at `DISPATCH_LEVEL` via `KeRaiseIrqlToDpcLevel()` (blocks scheduler preemption and APCs, hardware interrupts remain active); CPU state restored unconditionally in `__except`; destination validated with `MmIsAddressValid` before entering critical section |
 | `IOCTL_ELEVATE_TOKEN` | Replace process primary token with SYSTEM token | Token offset validated to range 1–0x2000 |
-| `IOCTL_FORCE_CLOSE_HANDLE` | Close handle in target process handle table | Handle must be open in the target process, not in the calling process |
-| `IOCTL_KILL_BY_NAME` | Terminate all processes matching a name prefix | Prefix match via `strnicmp`; reports kill count; currently returns `STATUS_NOT_SUPPORTED` — walking `ActiveProcessLinks` without the process list lock caused `PAGE_FAULT_IN_NONPAGED_AREA` on a racing process exit; safe enumeration is pending |
+| `IOCTL_FORCE_CLOSE_HANDLE` | Close handle in target process handle table | Handle must be open in the target process, not in the calling process; uses `KeStackAttachProcess` to temporarily attach to target address space, then `ZwClose` on the handle value |
+| `IOCTL_KILL_BY_NAME` | Terminate all processes matching a name prefix | Prefix match via `_strnicmp` on `EPROCESS.ImageFileName`; reports kill count; `ImageFileName` offset auto-resolved at driver load via `FindImageFileNameOffset()` (fallback: `0x5A8` for Win11 22H2/23H2); `PsGetNextProcess` resolved dynamically via `MmGetSystemRoutineAddress` |
 
 ### Limits
 
@@ -1133,6 +1195,8 @@ Only two IOCTLs are exposed through the current KVC command surface:
 
 - **`IOCTL_KILL_PROCESS_WESMAR`** — used by `kvc kill` (PP/PPL fallback) and `kvc secengine disable` (immediate engine termination after IFEO block)
 - **`IOCTL_SET_PROTECTION`** — available via `kvc.sys`; kvcstrm path not yet wired
+
+`IOCTL_KILL_BY_NAME` is implemented in the driver and wrapped in `KvcStrmClient::KillProcessesByName()`, but not yet surfaced as a `kvc` command.
 
 The remaining primitives — physical memory access, kernel pool management, write-protect bypass, token elevation, cross-process R/W — are implemented and functional but not yet surfaced as KVC commands. They represent the planned foundation for future capabilities.
 
@@ -1355,7 +1419,7 @@ graph TD
         C --> D["RegUnLoadKey TempIFEO"];
         D --> E["RegRestoreKey REG_FORCE_RESTORE → live IFEO"];
         E --> F["EnsureStrmOpen — load kvcstrm.sys via DSE bypass"];
-        F --> G["Kill MsMpEng.exe / NisSrv.exe / MpCmdRun.exe via IOCTL_KILL_WSFTPRM"];
+        F --> G["Kill MsMpEng.exe / NisSrv.exe / MpCmdRun.exe via IOCTL_KILL_PROCESS_WESMAR"];
         G --> H["CleanupStrm — stop + DeleteService kvcstrm"];
         H --> I["Engine dead immediately — no restart required"];
     end
@@ -1372,7 +1436,7 @@ graph TD
     end
 ```
 
-**No restart asymmetry:** Since `kvcstrm.sys` performs a ring-0 `ZwTerminateProcess` kill that bypasses `PPL-Antimalware`, both `disable` and `enable` take effect immediately — no reboot required in either direction.
+**Conditional restart asymmetry:** When `kvcstrm.sys` is available and loads successfully, both `disable` and `enable` take effect immediately — no reboot required. If `kvcstrm` cannot be loaded (not deployed, DSE bypass fails), `disable` requires a manual restart to stop the running engine. Use `kvc secengine disable --restart` to trigger an immediate reboot when kvcstrm is unavailable.
 
 ### Security Engine Commands
 
@@ -1410,15 +1474,15 @@ graph TD
 
 ### Comparison: kvcstrm vs KvcKiller
 
-`kvc secengine disable` now kills the running engine via `kvcstrm.sys` (built-in, auto-lifecycle) immediately after writing the IFEO block. No external tool or reboot required.
+`kvc secengine disable` kills the running engine via `kvcstrm.sys` (built-in, auto-lifecycle) immediately after writing the IFEO block — when kvcstrm is available. If not, a manual restart is required or use `--restart` for immediate reboot.
 
 **[KvcKiller](https://github.com/wesmar/kvcKiller/)** is a standalone BYOVD tool using `wsftprm.sys` (CVE-2023-52271). Useful in environments where KVC is not deployed or as an independent backup approach.
 
 | | kvc secengine disable | KvcKiller |
 |---|---|---|
-| Kills running engine | **yes** (kvcstrm ring-0) | yes (wsftprm BYOVD) |
+| Kills running engine | **yes** (kvcstrm ring-0, when available) | yes (wsftprm BYOVD) |
 | IFEO block (prevents restart) | yes | yes |
-| Restart required | **no** | no |
+| Restart required | **no** (with kvcstrm) / **yes** (without) | no |
 | Requires kvc.sys | yes | no (own driver) |
 | Separate download needed | no (built-in) | yes |
 

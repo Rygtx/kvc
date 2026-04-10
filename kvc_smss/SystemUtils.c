@@ -1,14 +1,44 @@
+// ============================================================================
+// SystemUtils — CRT replacement, string primitives, I/O helpers, INI parser
+//
+// No standard library is available (NODEFAULTLIB).  All string functions,
+// memory operations, and display routines are implemented here.
+//
+// Naming conventions:
+//   *_safe  — bounded variant that never writes past destSize WCHARs and
+//              always null-terminates; return value semantics match strlcpy/cat
+//              (returns full source length, possibly > destSize-1).
+//   *_check — boolean check only; does not modify the string.
+//   *_impl  — internal reimplementation of a standard C function.
+//
+// DisplayMessage outputs via NtDisplayString (blue boot screen text) and is
+// gated on g_VerboseMode.  DisplayAlwaysMessage is unconditional and is used
+// for critical errors only.
+// ============================================================================
+
 #include "SystemUtils.h"
 
-// Required by some compilers for large stack allocations
+#define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004)
+#define SystemModuleInformation 11
+
+// Stub for the MSVC compiler's stack-probe helper.  The real __chkstk probes
+// stack pages on entry to functions with large locals; here it is a no-op
+// because the full 1 MB stack is pre-committed at process creation.
 void __chkstk(void) {}
 
-// Stay quiet until [Config] is parsed.
+// Suppresses NtDisplayString output until [Config] Verbose= has been parsed.
 BOOLEAN g_VerboseMode = FALSE;
 
 void* memset_impl(void* dest, int c, SIZE_T count) {
     unsigned char* d = (unsigned char*)dest;
     while (count--) *d++ = (unsigned char)c;
+    return dest;
+}
+
+void* memcpy_impl(void* dest, const void* src, SIZE_T count) {
+    unsigned char* d = (unsigned char*)dest;
+    const unsigned char* s = (const unsigned char*)src;
+    while (count--) *d++ = *s++;
     return dest;
 }
 
@@ -134,6 +164,29 @@ BOOLEAN validate_string_space(SIZE_T currentLen, SIZE_T addLen, SIZE_T maxLen) {
     return TRUE;
 }
 
+SIZE_T UnicodeStringCopySafe(WCHAR* dest, SIZE_T destSize, const UNICODE_STRING* src) {
+    SIZE_T srcLen, copyLen, i;
+
+    if (!dest || destSize == 0) {
+        return (src && src->Buffer) ? (src->Length / sizeof(WCHAR)) : 0;
+    }
+
+    if (!src || !src->Buffer) {
+        dest[0] = 0;
+        return 0;
+    }
+
+    srcLen = src->Length / sizeof(WCHAR);
+    copyLen = (srcLen < destSize - 1) ? srcLen : (destSize - 1);
+
+    for (i = 0; i < copyLen; i++) {
+        dest[i] = src->Buffer[i];
+    }
+    dest[i] = 0;
+
+    return srcLen;
+}
+
 void TrimString(PWSTR str) {
     PWSTR start = str, end;
     while (*start == L' ' || *start == L'\t' || *start == L'\r' || *start == L'\n') start++;
@@ -196,10 +249,7 @@ void ULONGLONGToHexString(ULONGLONG value, PWSTR buffer, BOOLEAN includePrefix) 
 static void DisplayMessageInternal(PCWSTR message) {
     if (!message) return;
     WCHAR tempBuffer[512];
-    SIZE_T len = wcslen(message);
-    if (len >= 512) len = 511;
-    wcscpy(tempBuffer, message);
-    tempBuffer[len] = L'\0';
+    wcscpy_safe(tempBuffer, sizeof(tempBuffer) / sizeof(tempBuffer[0]), message);
     UNICODE_STRING usMsg;
     RtlInitUnicodeString(&usMsg, tempBuffer);
     NtDisplayString(&usMsg);
@@ -226,14 +276,103 @@ void DisplayStatus(NTSTATUS status) {
     DisplayMessage(statusMsg);
 }
 
+BOOLEAN AllocateZeroedBuffer(SIZE_T size, PVOID* outBuffer) {
+    PVOID base = NULL;
+    SIZE_T regionSize;
+    NTSTATUS status;
+
+    if (!outBuffer || size == 0) return FALSE;
+
+    regionSize = size;
+    status = NtAllocateVirtualMemory((HANDLE)-1, &base, 0, &regionSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(status)) {
+        return FALSE;
+    }
+
+    memset_impl(base, 0, regionSize);
+    *outBuffer = base;
+    return TRUE;
+}
+
+void FreeAllocatedBuffer(PVOID buffer) {
+    SIZE_T regionSize = 0;
+
+    if (!buffer) return;
+    NtFreeVirtualMemory((HANDLE)-1, &buffer, &regionSize, MEM_RELEASE);
+}
+
+// Allocates a buffer and fills it with the kernel module list via
+// NtQuerySystemInformation(SystemModuleInformation=11).
+// Retries up to 4 times with an expanding buffer when STATUS_INFO_LENGTH_MISMATCH
+// is returned (the module count can change between calls).
+// Caller must free *outModuleInfo with FreeAllocatedBuffer when done.
+BOOLEAN QuerySystemModuleInformation(SYSTEM_MODULE_INFORMATION** outModuleInfo) {
+    ULONG returnLength = 0;
+    NTSTATUS status;
+    ULONG attempt;
+
+    if (!outModuleInfo) return FALSE;
+    *outModuleInfo = NULL;
+
+    status = NtQuerySystemInformation(SystemModuleInformation, NULL, 0, &returnLength);
+    if (returnLength == 0 && NT_SUCCESS(status)) {
+        return FALSE;
+    }
+
+    if (returnLength == 0) {
+        returnLength = sizeof(SYSTEM_MODULE_INFORMATION) + (sizeof(SYSTEM_MODULE_ENTRY) * 64);
+    }
+
+    for (attempt = 0; attempt < 4; attempt++) {
+        PVOID buffer = NULL;
+        SIZE_T allocSize = (SIZE_T)returnLength + 0x1000;
+
+        if (!AllocateZeroedBuffer(allocSize, &buffer)) {
+            return FALSE;
+        }
+
+        status = NtQuerySystemInformation(SystemModuleInformation, buffer, (ULONG)allocSize, &returnLength);
+        if (NT_SUCCESS(status)) {
+            *outModuleInfo = (SYSTEM_MODULE_INFORMATION*)buffer;
+            return TRUE;
+        }
+
+        FreeAllocatedBuffer(buffer);
+        if (status != STATUS_INFO_LENGTH_MISMATCH) {
+            return FALSE;
+        }
+        if (returnLength == 0) {
+            returnLength = (ULONG)(allocSize * 2);
+        }
+    }
+
+    return FALSE;
+}
+
+// Reads the entire INI file into a newly allocated wide-character buffer.
+// Encoding detection (in order of precedence):
+//   1. UTF-16 LE BOM (0xFF 0xFE) — copy WCHARs directly, skip BOM.
+//   2. Heuristic: if bytes 1 and 3 are 0x00, treat as UTF-16 LE without BOM.
+//   3. UTF-8 BOM (0xEF 0xBB 0xBF) — widen bytes, skip BOM.
+//   4. Default: treat as ASCII/UTF-8, widen bytes; non-ASCII replaced with '?'.
+// *outBuffer is allocated with NtAllocateVirtualMemory; caller frees via
+// FreeIniFileBuffer.
 BOOLEAN ReadIniFile(PCWSTR filePath, PWSTR* outBuffer) {
     UNICODE_STRING usFilePath;
     OBJECT_ATTRIBUTES oa;
     IO_STATUS_BLOCK iosb;
-    HANDLE hFile;
+    HANDLE hFile = NULL;
     NTSTATUS status;
-    static WCHAR staticBuffer[8192];
+    FILE_STANDARD_INFORMATION fileInfo;
+    PUCHAR rawBuffer = NULL;
+    PWSTR wideBuffer = NULL;
     LARGE_INTEGER byteOffset;
+    SIZE_T rawAllocSize;
+    SIZE_T bytesRead;
+    SIZE_T start;
+
+    if (!outBuffer) return FALSE;
+    *outBuffer = NULL;
 
     RtlInitUnicodeString(&usFilePath, filePath);
     InitializeObjectAttributes(&oa, &usFilePath, OBJ_CASE_INSENSITIVE, NULL, NULL);
@@ -241,15 +380,103 @@ BOOLEAN ReadIniFile(PCWSTR filePath, PWSTR* outBuffer) {
     status = NtOpenFile(&hFile, FILE_READ_DATA | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ | FILE_SHARE_WRITE, 0);
     if (!NT_SUCCESS(status)) return FALSE;
 
-    memset_impl(staticBuffer, 0, sizeof(staticBuffer));
+    memset_impl(&fileInfo, 0, sizeof(fileInfo));
+    status = NtQueryInformationFile(hFile, &iosb, &fileInfo, sizeof(fileInfo), FileStandardInformation);
+    if (!NT_SUCCESS(status)) {
+        NtClose(hFile);
+        return FALSE;
+    }
+
+    if (fileInfo.EndOfFile.QuadPart <= 0) {
+        NtClose(hFile);
+        return FALSE;
+    }
+
+    rawAllocSize = (SIZE_T)fileInfo.EndOfFile.QuadPart + sizeof(WCHAR);
+    if (!AllocateZeroedBuffer(rawAllocSize, (PVOID*)&rawBuffer)) {
+        NtClose(hFile);
+        return FALSE;
+    }
+
     byteOffset.QuadPart = 0;
-    status = NtReadFile(hFile, NULL, NULL, NULL, &iosb, staticBuffer, sizeof(staticBuffer) - sizeof(WCHAR), &byteOffset, NULL);
+    status = NtReadFile(hFile, NULL, NULL, NULL, &iosb, rawBuffer, (ULONG)(rawAllocSize - 1), &byteOffset, NULL);
     NtClose(hFile);
-    if (!NT_SUCCESS(status) && status != 0x103) return FALSE;
-    *outBuffer = staticBuffer;
+    if (!NT_SUCCESS(status) && status != 0x103) {
+        FreeAllocatedBuffer(rawBuffer);
+        return FALSE;
+    }
+
+    bytesRead = (SIZE_T)iosb.Information;
+    if (bytesRead == 0) {
+        FreeAllocatedBuffer(rawBuffer);
+        return FALSE;
+    }
+
+    // Detect UTF-16LE BOM or "looks like UTF-16LE" (many NUL bytes in odd positions).
+    BOOLEAN isUtf16Le = FALSE;
+    start = 0;
+    if (bytesRead >= 2 && rawBuffer[0] == 0xFF && rawBuffer[1] == 0xFE) {
+        isUtf16Le = TRUE;
+        start = 2;
+    } else if (bytesRead >= 4 && rawBuffer[1] == 0x00 && rawBuffer[3] == 0x00) {
+        isUtf16Le = TRUE;
+        start = 0;
+    }
+
+    if (isUtf16Le) {
+        SIZE_T wcharCount = (bytesRead - start) / sizeof(WCHAR);
+
+        if (!AllocateZeroedBuffer((wcharCount + 1) * sizeof(WCHAR), (PVOID*)&wideBuffer)) {
+            FreeAllocatedBuffer(rawBuffer);
+            return FALSE;
+        }
+
+        memcpy_impl(wideBuffer, rawBuffer + start, wcharCount * sizeof(WCHAR));
+        wideBuffer[wcharCount] = 0;
+        FreeAllocatedBuffer(rawBuffer);
+        *outBuffer = wideBuffer;
+        return TRUE;
+    }
+
+    // Detect UTF-8 BOM, otherwise treat as ASCII/UTF-8 and widen bytes.
+    if (bytesRead >= 3 && rawBuffer[0] == 0xEF && rawBuffer[1] == 0xBB && rawBuffer[2] == 0xBF) {
+        start = 3;
+    } else {
+        start = 0;
+    }
+
+    if (!AllocateZeroedBuffer((bytesRead - start + 1) * sizeof(WCHAR), (PVOID*)&wideBuffer)) {
+        FreeAllocatedBuffer(rawBuffer);
+        return FALSE;
+    }
+
+    SIZE_T out = 0;
+    for (SIZE_T i = start; i < bytesRead; ++i) {
+        UCHAR b = rawBuffer[i];
+        if (b == 0) break;
+        // INI is ASCII keys/values; non-ASCII is replaced.
+        wideBuffer[out++] = (b < 0x80) ? (WCHAR)b : L'?';
+    }
+    wideBuffer[out] = 0;
+    FreeAllocatedBuffer(rawBuffer);
+    *outBuffer = wideBuffer;
     return TRUE;
 }
 
+void FreeIniFileBuffer(PWSTR buffer) {
+    FreeAllocatedBuffer(buffer);
+}
+
+// Parses INI content (already widened to WCHAR) into entries[] and config.
+// Sections:
+//   [Config]     — fills CONFIG_SETTINGS (Execute, RestoreHVCI, Verbose,
+//                  DriverDevice, IOCTLs, OffsetSource, kernel offsets).
+//   [DSE_STATE]  — silently skipped (handled by LoadStateSection).
+//   [<name>]     — fills the next INI_ENTRY (Action, ServiceName, …).
+//
+// Lines starting with ';' or '#' are comments.  Values are trimmed and
+// semicolon-terminated comments within values are stripped by TrimString.
+// Returns the number of completed INI_ENTRY records written to entries[].
 ULONG ParseIniFile(PWSTR iniContent, PINI_ENTRY entries, ULONG maxEntries, PCONFIG_SETTINGS config) {
     ULONG entryCount = 0;
     PWSTR line = iniContent, nextLine;
@@ -265,6 +492,10 @@ ULONG ParseIniFile(PWSTR iniContent, PINI_ENTRY entries, ULONG maxEntries, PCONF
     config->DriverDevice[0] = 0;
     config->IoControlCode_Read = 0;
     config->IoControlCode_Write = 0;
+    config->OffsetSource = OFFSET_SOURCE_AUTO;
+    config->Offset_SeCiCallbacks = 0;
+    config->Offset_Callback = 0;
+    config->Offset_SafeFunction = 0;
     
     if (!iniContent || iniContent[0] == 0) return 0;
     if (iniContent[0] == 0xFEFF) line++;
@@ -323,6 +554,12 @@ ULONG ParseIniFile(PWSTR iniContent, PINI_ENTRY entries, ULONG maxEntries, PCONF
                 else if (_wcsicmp_impl(key, L"DriverDevice") == 0) wcscpy_safe(config->DriverDevice, MAX_PATH_LEN, value);
                 else if (_wcsicmp_impl(key, L"IoControlCode_Read") == 0) StringToULONG(value, &config->IoControlCode_Read);
                 else if (_wcsicmp_impl(key, L"IoControlCode_Write") == 0) StringToULONG(value, &config->IoControlCode_Write);
+                else if (_wcsicmp_impl(key, L"OffsetSource") == 0) {
+                    if (_wcsicmp_impl(value, L"SCAN") == 0) config->OffsetSource = OFFSET_SOURCE_SCAN;
+                    else if (_wcsicmp_impl(value, L"PDB") == 0) config->OffsetSource = OFFSET_SOURCE_PDB;
+                    else if (_wcsicmp_impl(value, L"PDB,SCAN") == 0) config->OffsetSource = OFFSET_SOURCE_PDB_SCAN;
+                    else config->OffsetSource = OFFSET_SOURCE_AUTO;
+                }
                 else if (_wcsicmp_impl(key, L"Offset_SeCiCallbacks") == 0) StringToULONGLONG(value, &config->Offset_SeCiCallbacks);
                 else if (_wcsicmp_impl(key, L"Offset_Callback") == 0) StringToULONGLONG(value, &config->Offset_Callback);
                 else if (_wcsicmp_impl(key, L"Offset_SafeFunction") == 0) StringToULONGLONG(value, &config->Offset_SafeFunction);

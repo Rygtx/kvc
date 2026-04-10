@@ -57,6 +57,7 @@ MmCopyVirtualMemory(
 // --- Advanced "Bank-grade" operations ---
 #define IOCTL_KILL_BY_NAME           CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_FORCE_CLOSE_HANDLE     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_CALL_KERNEL            CTL_CODE(FILE_DEVICE_UNKNOWN, 0x812, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // =============================================================
 // LIMITS
@@ -91,6 +92,41 @@ typedef struct _KERNEL_CLOSE_HANDLE_REQUEST {
     HANDLE   HandleValue;   // The handle value to close
     NTSTATUS Status;
 } KERNEL_CLOSE_HANDLE_REQUEST, *PKERNEL_CLOSE_HANDLE_REQUEST;
+
+// --- Kernel call primitive (IOCTL_CALL_KERNEL) ---
+//
+// Calls Address as a four-argument x64 function: Args[0..3] → RCX/RDX/R8/R9.
+// Executes at PASSIVE_LEVEL.  ReturnValue receives the 64-bit return value.
+//
+// *** RAW PRIMITIVE -- caller owns all preconditions ***
+//
+// The driver checks only that Address is in kernel canonical space and is
+// currently mapped.  It does NOT validate prototype, IRQL contract, process
+// context, lock state, or any other calling convention requirement.
+// __try/__except catches hardware faults on the call site; it does NOT
+// protect against bugchecks, IRQL violations, deadlocks, or state corruption
+// triggered inside the callee.
+//
+// Caller responsibilities:
+//   - Match the actual function prototype (argument count and types).
+//   - Ensure correct IRQL before issuing the IOCTL.
+//   - Establish required process attachment / APC state as needed.
+//   - Hold any locks or object references the target routine expects.
+//   - Use OMNI_ALLOC_NONPAGED_EXECUTE for shellcode targets so pages are
+//     always resident and marked executable.
+//
+// Typical use cases:
+//   - Calling exported kernel routines by address (PDB-resolved or via
+//     MmGetSystemRoutineAddress).
+//   - Executing shellcode in a POOL_FLAG_NON_PAGED_EXECUTE buffer obtained
+//     via IOCTL_ALLOC_KERNEL (Flags = OMNI_ALLOC_NONPAGED_EXECUTE).
+
+typedef struct _KERNEL_CALL_REQUEST {
+    ULONG64  Address;       // Kernel virtual address to call
+    ULONG64  Args[4];       // Arguments: RCX, RDX, R8, R9 (unused slots = 0)
+    ULONG64  ReturnValue;   // Filled by driver: return value from the call
+    NTSTATUS Status;
+} KERNEL_CALL_REQUEST, *PKERNEL_CALL_REQUEST;
 
 // --- Virtual memory R/W (existing, unchanged) ---
 

@@ -21,6 +21,10 @@ public:
     // Get offsets for specific kernel path (backward compatibility)
     std::optional<std::pair<DWORD64, DWORD64>> GetSymbolOffsets(const std::wstring& kernelPath) noexcept;
 
+    // Heuristic fallback: scan ntoskrnl.exe PE directly (Fast->Structural->Legacy)
+    // Used when PDB download/resolution fails
+    std::optional<std::pair<DWORD64, DWORD64>> FindSeCiHeuristicOffsets(const std::wstring& kernelPath) noexcept;
+
     // Generic symbol resolver for any module
     std::optional<DWORD64> GetSymbolOffset(const std::wstring& modulePath, const std::wstring& symbolName) noexcept;
 
@@ -45,6 +49,9 @@ private:
                            const std::wstring& targetPath) noexcept;
     bool HttpDownload(const std::wstring& url, std::vector<BYTE>& output) noexcept;
     bool CreateDirectoryTree(const std::wstring& path) noexcept;
+
+    // Remove all GUID subdirectories under pdbName\ except currentGuid
+    void PurgeStaleGuids(const std::wstring& pdbName, const std::wstring& currentGuid) noexcept;
 
     // Offset calculation from disk
     std::optional<std::pair<DWORD64, DWORD64>> CalculateOffsetsFromDisk(

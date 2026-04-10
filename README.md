@@ -11,6 +11,133 @@
 ---
 ## 📋 Changelog
 
+**[10.04.2026]**
+
+<details>
+<summary><strong>🔍 g_CiOptions: fully offline semantic locator — Windows 10 and Windows 11 26H1 (no PDB)</strong> (click to expand)</summary>
+
+#### Background
+
+`g_CiOptions` is a DWORD in `ci.dll` that controls Driver Signature Enforcement and HVCI state. KVC must locate it at runtime to read or patch DSE flags. Prior to this release, the locator used a fixed offset from the `CiPolicy` PE section and, when that failed (Windows 10), fell back to a PDB symbol download from the Microsoft Symbol Server.
+
+This release replaces both paths with a deterministic offline analysis. No network access is required. No PDB files are downloaded. No offsets are hardcoded.
+
+---
+
+#### Windows 11 26H1 — Offset Change in CiPolicy Section
+
+In Windows 11 build 26100 (26H1), Microsoft relocated `g_CiOptions` within the `CiPolicy` PE section. The field moved from offset `+0x4` to `+0x8` relative to the section start. The previous implementation read the hardcoded `CiPolicy+0x4` unconditionally, which returned `0x00000000` on 26H1 — a silent failure that allowed a DSE patch operation to proceed against a null-derived address, causing a BSOD.
+
+The shift was confirmed by IDA analysis of `C:\Windows\System32\ci.dll` on build 26100:
+
+```
+CiPolicy section start: 0x180053000
+g_CiOptions:            0x180053008   (offset +0x8)
+```
+
+The build-number fallback (`GetCiOptionsBuildFallbackOffset`) now returns `+0x8` for builds >= 26100 and `+0x4` for earlier builds. The fallback is only reached if the semantic probe is inconclusive.
+
+---
+
+#### CiOptionsFinder — Semantic Offline Probe
+
+`CiOptionsFinder` is a new class extracted from `DSEBypass`. It operates entirely on the on-disk `ci.dll` image (read from `System32` at runtime) and live kernel memory reads via the driver primitive. No PDB, no symbol server, no internet.
+
+**Win11 path (CiPolicy section present):**
+
+1. Walk the live kernel PE headers via driver reads to locate the `CiPolicy` section base and size.
+2. Load `ci.dll` from disk. Parse PE sections.
+3. Scan all executable sections (`.text`, `PAGE`, `INIT`) for RIP-relative instructions that reference an address within the first 64 bytes of `CiPolicy`.
+4. Recognised encodings:
+
+| Encoding | Instruction | Score |
+|---|---|---|
+| `8B /5 disp32` | `mov r32, [rip+disp32]` | 12 |
+| `REX 8B /5 disp32` | `mov r64/r32, [rip+disp32]` | 12 |
+| `F7 05 disp32 imm32` | `test [rip+disp32], imm32` | 18 + mask bonus |
+| `0F BA 25 disp32 imm8` | `bt [rip+disp32], imm8` | 16 |
+| `0F BA 2D disp32 imm8` | `bts [rip+disp32], imm8` | 16 |
+| `81 3D disp32 imm32` | `cmp [rip+disp32], imm32` | 10 + mask bonus |
+
+5. Score candidates by reference count, instruction kind diversity, and proximity to section start.
+6. Accept the winner if it leads runner-up by >= 8 points and has at least one flags-like use.
+7. Fall back to the build-number offset only if the probe is inconclusive.
+
+**Win10 path (no CiPolicy section):**
+
+On Windows 10, `ci.dll` does not contain a `CiPolicy` section. `g_CiOptions` resides in `.data`. The locator uses a different scoring strategy:
+
+1. Load `ci.dll` from disk. Parse PE sections. Locate `.data`.
+2. Scan code sections for RIP-relative references landing in `.data` at 4-byte-aligned addresses.
+3. Two additional encodings are required for Win10:
+
+| Encoding | Instruction | Notes |
+|---|---|---|
+| `85 /r disp32` | `test [rip+disp32], r32` | Mask in register — no immediate |
+| `REX 85 /r disp32` | `test [rip+disp32], r32` | REX-prefixed form |
+
+   The compiler in this build emits register-loaded masks (`mov ebx, 4000h` / `test [rip+x], ebx`) rather than direct-memory immediates. The decoder handles both forms.
+
+4. Win10 `ci.dll` prefixes many RIP-relative accesses with `0x2E` (CS segment override). The scanner skips this prefix transparently before decoding.
+
+5. The `PAGE` section on Win10 kernel drivers is marked `IMAGE_SCN_CNT_CODE` but not `IMAGE_SCN_MEM_EXECUTE` in the PE headers (execute permission is granted by the memory manager at load time). The section filter uses `CNT_CODE OR MEM_EXECUTE` to avoid skipping `PAGE` entirely.
+
+6. After a `mov reg, [rip+target]`, the scanner looks ahead up to 32 bytes for a `test reg, imm` instruction. The full 32-bit immediate is extracted — not truncated to 8 bits — so high-bit family masks (`0x4000`, `0x8000`, `0x200000`, `0x800000`) are detected from the register path as well.
+
+7. Each `.data` address accumulates:
+
+| Field | Meaning |
+|---|---|
+| `TotalHits` | Total instruction references |
+| `DirectHighMasks` | High-bit family tests seen (bit 0: 0x4000/0x8000, bit 1: 0x200000/0x800000) |
+| `LowBitEvidence` | Low-bit family tests from mov+lookahead (bits 0-4) |
+| `BitOpsCount` | Count of `bt`/`bts` operations |
+| `DistinctFuncApx` | Approximate distinct-function count (reference delta > 0x200 bytes) |
+
+8. **Winner selection uses qualification, not raw score.** A candidate enters the final round only if it satisfies:
+
+```
+(DirectHighMasks != 0  OR  BitOpsCount >= 2)  AND  LowBitEvidence != 0
+```
+
+   This deliberately excludes high-volume non-flag variables (spinlocks, counters, pointers) that accumulate large raw scores from frequent MOV references but lack the bit-manipulation signature of a mutable DWORD flags field. The score margin is computed only among qualified candidates — an unqualified candidate with a higher raw score does not suppress the winner.
+
+9. A light runtime sanity read checks the live kernel value of the winner. A non-zero high byte (suggesting a pointer or non-flag datum) is logged as a warning but does not block the result — the structural qualification criteria are the authoritative gate.
+
+---
+
+#### Why No Hardcoded Patterns
+
+Typical PoC implementations for g_CiOptions location rely on one of three approaches: a fixed RVA extracted from a specific build, a known byte pattern (`signature scan`) around the variable, or a PDB symbol lookup. All three require either build-specific data or internet connectivity.
+
+This implementation requires neither. The scoring algorithm was derived from IDA analysis of multiple `ci.dll` builds across Windows 10 19041 and Windows 11 26H1. The recognised instruction patterns, scoring weights, and qualification criteria are a direct encoding of the semantic properties of `g_CiOptions` — specifically: that it is a DWORD flag field that is read frequently, tested against both low enforcement bits and high policy bits, and has bits set via `bts` during CI initialisation. Any build of `ci.dll` that compiles from the same source will produce the same observable code patterns around the same variable, regardless of address.
+
+Verified output on Windows 10 19041.6811 (latest updates):
+
+```
+[+] g_CiOptions via Win10 .data probe: 0xFFFFF80230C391B0
+    RVA=0x391B0  score=1445  hits=85  highMasks=0x3  lowBits=0x1F  bitOps=7
+[*] g_CiOptions value: 0x0001C006
+```
+
+`highMasks=0x3` confirms both high-bit families were found. `lowBits=0x1F` confirms all five low-bit DSE enforcement flags were observed. `bitOps=7` matches the `bts` call count visible in IDA for this build (IDA reports 82 cross-references; the offline scanner counts 85 due to inclusion of the `INIT` section).
+
+---
+
+#### HVCI Detection Fix
+
+The `IsHVCIEnabled` check previously required all three HVCI bits simultaneously (`value == 0x0001C000`). Some configurations set only a subset. The check now uses `(value & 0x0001C000) != 0` — any bit in the HVCI family is sufficient. A registry fallback (`SecurityServicesRunning` bit 2 and the `HypervisorEnforcedCodeIntegrity\Running` key) handles configurations where HVCI is active but the bit state in `g_CiOptions` is not yet reflected at query time.
+
+---
+
+#### kvcstrm — New IOCTL
+
+One additional IOCTL primitive was added to the `kvcstrm.sys` (OmniDriver) interface in this release. See the kvcstrm section for the updated primitive table.
+
+</details>
+
+---
+
 **[08.04.2026]**
 
 <details>
@@ -341,7 +468,7 @@ When this value is present, the Windows loader hands every `MsMpEng.exe` launch 
 **[30.03.2026]**
 
 <details>
-<summary><strong>💾 Windows 10 DSE Support via SymbolEngine</strong> (click to expand)</summary>
+<summary><strong>💾 Windows 10 DSE Support via SymbolEngine</strong> (click to expand) — superseded by [10.04.2026]</summary>
 
 ```
 C:\>kvc driver load kvckbd
@@ -352,6 +479,8 @@ C:\>kvc driver load kvckbd
 ```
 
 **Universal DSE bypass** — `kvc dse off` now works on both Windows 10 and Windows 11. The Standard method uses a dual-path approach: first attempts fast PE-section parsing to locate the `CiPolicy` section (Windows 11), and if not found, automatically falls back to SymbolEngine-based resolution of `g_CiOptions` from PDB symbols (Windows 10). This ensures compatibility across all supported Windows versions without requiring the `--safe` flag. Symbol resolution is performed locally using Microsoft Symbol Server — PDB files are downloaded automatically on first use and cached in `C:\ProgramData\dbg\sym\`.
+
+> **Superseded:** As of [10.04.2026], the SymbolEngine PDB fallback for Windows 10 has been replaced by a fully offline semantic probe (`CiOptionsFinder`). No PDB download or network access is required. The `SymbolEngine` infrastructure is retained for `SeCiCallbacks`/`SafeFunction` offset resolution used by `dse off --safe` and `kvc_smss`.
 
 </details>
 
@@ -395,7 +524,7 @@ C:\>kvc driver load kvckbd
 
 **Windows Defender & Tamper Protection automation** — Real-Time Protection and Tamper Protection can be toggled via `kvc rtp on/off/status` and `kvc tp on/off/status`. Implemented via `IUIAutomation` (ghost mode): KVC opens the Windows Security window (`windowsdefender://threatsettings`) with the taskbar hidden and console set topmost, temporarily zeros `ConsentPromptBehaviorAdmin`/`PromptOnSecureDesktop` to suppress UAC prompts (backed up and restored atomically), locates the toggle switch via UIA tree traversal, clicks it, and closes the window. On first run after boot, a pre-warming pass initialises the Defender COM stack. No PowerShell, no WMI — literal robot clicking.
 
-**Next-Generation DSE Bypass** — PatchGuard-safe implementation using SeCiCallbacks/ZwFlushInstructionCache redirection. Works with Secure Boot enabled (requires Memory Integrity off). Symbol-based, kernel-version agnostic. Legacy `g_CiOptions` patch preserved for edge cases.
+**Next-Generation DSE Bypass** — PatchGuard-safe implementation using SeCiCallbacks/ZwFlushInstructionCache redirection. Works with Secure Boot enabled (requires Memory Integrity off). Symbol-based for callback resolution; `g_CiOptions` located via offline semantic probe (no PDB, no network). Legacy direct `g_CiOptions` patch preserved for standard systems.
 
 **External driver loading** — `kvc driver load/reload/stop/remove` for seamless unsigned driver management with automatic DSE bypass and restoration. `load` accepts optional `-s <0–4>` to set the service start type (0=Boot, 1=System, 2=Auto, 3=Demand, 4=Disabled); defaults to Demand (3).
 
@@ -558,7 +687,7 @@ graph LR
       * The `Controller` uses `ServiceManager` to manage the lifecycle of the embedded kernel driver (`kvc.sys`).
       * Four binaries are extracted steganographically from the embedded icon resource (XOR-decrypted CAB): `kvc.sys` for memory read/write and EPROCESS manipulation, `kvcstrm.sys` (OmniDriver) for PP/PPL-bypassing process termination, `kvc_smss.exe` (SMSS boot-phase loader), and a modified `ExplorerFrame​.dll` for watermark removal.
       * Communication occurs via IOCTLs: `kvcDrv` interface for `kvc.sys` (memory operations), `strmDrv` interface for `kvcstrm.sys` (kill operations). `kvcstrm` uses auto-lifecycle: loaded on demand, service entry removed after use.
-4.  **Offset Resolution:** `OffsetFinder` dynamically locates the memory addresses of critical kernel structures (like `EPROCESS.Protection`, `g_CiOptions`) within `ntoskrnl.exe` and `ci.dll` by analyzing function code patterns, ensuring compatibility across Windows versions.
+4.  **Offset Resolution:** `OffsetFinder` dynamically locates `EPROCESS.Protection` and related structures in `ntoskrnl.exe`. `g_CiOptions` in `ci.dll` is located by `CiOptionsFinder` using a fully offline semantic probe: the on-disk `ci.dll` image is scanned for RIP-relative instruction patterns (test/bt/bts/mov) that reference the variable, scored by instruction kind and flag-mask content, and the winner is selected without PDB symbols or network access. Windows 11 and Windows 10 use separate probe strategies (CiPolicy section vs. `.data` section scoring).
 5.  **Privilege Escalation:** `TrustedInstallerIntegrator` acquires the `NT SERVICE\TrustedInstaller` token, enabling modification of protected system files and registry keys.
 6.  **Feature Logic:** Specific modules handle core functionalities:
       * `DSEBypass Logic` implements DSE control, including the HVCI bypass mechanism involving `skci.dll` manipulation.
@@ -612,12 +741,22 @@ DSE is a Windows security feature that prevents loading drivers not signed by Mi
 ### Understanding DSE and HVCI/VBS
 
   * **DSE:** Controlled by flags within the `g_CiOptions` variable in the `ci.dll` kernel module. A value of `0x6` typically indicates standard DSE enabled. Setting it to `0x0` disables the check.
-  * **HVCI/VBS (Hypervisor-Protected Code Integrity / Virtualization-Based Security):** On modern systems, HVCI uses virtualization to protect kernel memory, including `g_CiOptions`, from modification, even by code running in Ring-0. This state is often indicated by `g_CiOptions` having flags like `0x0001C000` set (e.g., `0x0001C006`).
+  * **HVCI/VBS (Hypervisor-Protected Code Integrity / Virtualization-Based Security):** On modern systems, HVCI uses virtualization to protect kernel memory, including `g_CiOptions`, from modification, even by code running in Ring-0. Active HVCI is indicated by any bit in the mask `0x0001C000` being set in `g_CiOptions` (e.g., `0x0001C006`), or confirmed via the `SecurityServicesRunning` registry value when the bit state is not yet reflected in kernel memory.
+  * **`g_CiOptions` location:** The address of `g_CiOptions` varies by Windows build and is not exported. KVC locates it at runtime using `CiOptionsFinder`, a fully offline semantic analyser. No PDB download, no network access, no hardcoded offsets or byte patterns. The analyser scans the on-disk `ci.dll` image for RIP-relative instruction references to the variable — specifically `test`/`bt`/`bts`/`mov` encodings — scores candidates by instruction kind, flag-mask content, and bit-operation count, and selects the winner deterministically. Two strategies are used depending on the Windows version detected at runtime:
+
+    | Platform | Strategy |
+    |---|---|
+    | Windows 11 (all builds including 26H1) | Scan code sections for references into the `CiPolicy` PE section; score by kind and mask |
+    | Windows 10 (no `CiPolicy` section) | Scan code sections for references into `.data`; qualify by `bts` count and low-bit evidence |
+
+    A build-number fallback (`+0x4` pre-26H1, `+0x8` from build 26100) is used only when the probe is inconclusive.
 
 KVC supports DSE control in **all scenarios**:
 
   * ✅ **Standard Systems** (`g_CiOptions = 0x6`): Direct memory patch via the driver.
-  * ✅ **Windows 10 (all builds)**: Automatic SymbolEngine fallback — `g_CiOptions` resolved from PDB symbols when `CiPolicy` section is not present in `ci.dll`.
+  * ✅ **Windows 10 (all builds, including latest updates)**: `g_CiOptions` located via `.data` semantic probe — no PDB, no network.
+  * ✅ **Windows 11 up to 25H2**: `g_CiOptions` located via `CiPolicy` section probe.
+  * ✅ **Windows 11 26H1 (build 26100+)**: Offset within `CiPolicy` changed from `+0x4` to `+0x8`. Handled automatically by the semantic probe; build-number fallback also updated.
   * ✅ **HVCI/VBS Enabled Systems** (`g_CiOptions = 0x0001C006` or similar): Requires a sophisticated bypass involving a reboot.
 
 ### How KVC Bypasses DSE
@@ -1217,6 +1356,7 @@ All requests go through a sequential `METHOD_BUFFERED` queue. Input buffer sizes
 | `IOCTL_ELEVATE_TOKEN` | Replace process primary token with SYSTEM token | Token offset validated to range 1–0x2000 |
 | `IOCTL_FORCE_CLOSE_HANDLE` | Close handle in target process handle table | Handle must be open in the target process, not in the calling process; uses `KeStackAttachProcess` to temporarily attach to target address space, then `ZwClose` on the handle value |
 | `IOCTL_KILL_BY_NAME` | Terminate all processes matching a name prefix | Prefix match via `_strnicmp` on `EPROCESS.ImageFileName`; reports kill count; `ImageFileName` offset auto-resolved at driver load via `FindImageFileNameOffset()` (fallback: `0x5A8` for Win11 22H2/23H2); `PsGetNextProcess` resolved dynamically via `MmGetSystemRoutineAddress` |
+| `IOCTL_CALL_KERNEL` | Call any kernel-space address as a 4-argument x64 function | Address validated for canonical kernel range and current mapping (`MmIsAddressValid`). Arguments mapped to RCX/RDX/R8/R9; 64-bit return value written back to caller. Executes at `PASSIVE_LEVEL`. `__try/__except` catches hardware faults on the call site only — IRQL violations, deadlocks, and state corruption inside the callee remain the caller's responsibility. Typical use: invoke exported kernel routines by address (PDB-resolved or via `MmGetSystemRoutineAddress`), or execute shellcode in a `POOL_FLAG_NON_PAGED_EXECUTE` buffer previously obtained via `IOCTL_ALLOC_KERNEL` |
 
 ### Limits
 

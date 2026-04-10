@@ -5,6 +5,7 @@
     <ClCompile Include="WmiDefenderClient.cpp" />
     <ClCompile Include="KvcStrmClient.cpp" />
     <ClCompile Include="ControllerCore.cpp" />
+    <ClCompile Include="CiOptionsFinder.cpp" />
     <ClCompile Include="DSEBypass.cpp" />
     <ClCompile Include="SymbolEngine.cpp" />
     <ClCompile Include="ControllerDSE.cpp" />
@@ -42,6 +43,7 @@
     <ClInclude Include="TrustedInstallerIntegrator.h" />
     <ClInclude Include="WmiDefenderClient.h" />
     <ClInclude Include="common.h" />
+    <ClInclude Include="CiOptionsFinder.h" />
     <ClInclude Include="DSEBypass.h" />
     <ClInclude Include="KvcStrmClient.h" />
     <ClInclude Include="SymbolEngine.h" />

@@ -1,14 +1,35 @@
 #ifndef BOOT_BYPASS_H
 #define BOOT_BYPASS_H
 
+// ============================================================================
+// BootBypass — NATIVE subsystem driver loader (kvc_smss)
+//
+// Runs at SMSS phase (before any Win32 subsystem).  No CRT, no stdlib.
+// Every type, structure, and API call is declared here from first principles
+// because NODEFAULTLIB means no SDK headers are included.
+//
+// Entry: NtProcessStartup (SUBSYSTEM:NATIVE), called by the NT kernel directly.
+// Stack: 1 MB reserved / 1 MB committed (explicit — compiler default is 1 MB
+//        reserved but only 8 KB committed; the explicit commit prevents guard-
+//        page faults during large stack frames in a no-SEH environment).
+// ============================================================================
+
 #pragma comment(lib, "ntdll.lib")
+// SUBSYSTEM:NATIVE — no win32 startup stub; ENTRY:NtProcessStartup called directly.
+// NODEFAULTLIB    — prevents linker from pulling in CRT or default SDK imports.
+// STACK           — 1 MB reserved + 1 MB committed: avoids guard-page faults.
 #pragma comment(linker, "/SUBSYSTEM:NATIVE /ENTRY:NtProcessStartup /NODEFAULTLIB /STACK:0x100000,0x100000")
+// Disable optimizations globally: prevents the compiler from reordering or
+// eliminating stores that are critical in the no-exception-handler environment.
 #pragma optimize("", off)
+// Disable stack probes: __chkstk is defined manually in SystemUtils.c.
 #pragma check_stack(off)
 
 // ============================================================================
 // BUILD CONFIGURATION
 // ============================================================================
+// Set to 1 to enable verbose debug output via NtDisplayString.
+// Unconditionally disabled in release — DEBUG_LOG expands to nothing.
 #define DEBUG_LOGGING_ENABLED 0
 
 // ============================================================================
@@ -18,13 +39,15 @@
 #define NULL 0
 #define TRUE 1
 #define FALSE 0
+// NTSTATUS codes used by this loader (subset of ntstatus.h)
 #define STATUS_SUCCESS 0
 #define STATUS_NO_SUCH_DEVICE 0xC0000000
 #define STATUS_OBJECT_NAME_NOT_FOUND 0xC0000034
-#define STATUS_OBJECT_NAME_COLLISION 0xC0000035
+#define STATUS_OBJECT_NAME_COLLISION 0xC0000035    // key/file already exists
 #define STATUS_OBJECT_NAME_INVALID 0xC0000033
 #define STATUS_BUFFER_TOO_SMALL 0xC0000023
-#define STATUS_IMAGE_ALREADY_LOADED 0xC000010E
+#define STATUS_IMAGE_ALREADY_LOADED 0xC000010E     // driver already in kernel
+// Privilege LUID constants (SE_* values from ntddk.h)
 #define SE_LOAD_DRIVER_PRIVILEGE 10
 #define SE_BACKUP_PRIVILEGE 17
 #define SE_RESTORE_PRIVILEGE 18
@@ -55,23 +78,35 @@
 #define REG_EXPAND_SZ 2
 #define REG_DWORD 4
 #define REG_MULTI_SZ 7
-#define MAX_ENTRIES 64
-#define MAX_PATH_LEN 512
+#define MAX_ENTRIES 64           // maximum driver entries parsed from drivers.ini
+#define MAX_PATH_LEN 512         // buffer size in WCHARs for all path strings
+
+// Native-namespace path — accessible before the drive letter symlinks exist.
 #define STATE_FILE_PATH L"\\SystemRoot\\drivers.ini"
+
+// DeviceGuard registry key for HVCI (Enabled DWORD).
 #define HVCI_REG_PATH L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity"
-#define DRIVERSTORE_REPO L"\\SystemRoot\\System32\\DriverStore\\FileRepository"
+
+// DriverStore FileRepository root and wildcard for kvc.sys package directory.
+#define DRIVERSTORE_REPO    L"\\SystemRoot\\System32\\DriverStore\\FileRepository"
 #define DRIVERSTORE_PATTERN L"avc.inf_amd64_*"
 
-// Type definitions
+// ============================================================================
+// TYPE SYSTEM
+// Redefined from scratch: no SDK headers are available (NODEFAULTLIB).
+// Sizes match x64 ABI used by ntdll.dll and ntoskrnl.exe on Windows.
+// ============================================================================
 typedef void VOID;
 typedef unsigned char UCHAR;
-typedef unsigned char BOOLEAN;
+typedef unsigned char BOOLEAN;  // NT convention: 0=FALSE, non-zero=TRUE
 typedef unsigned short USHORT;
 typedef unsigned short WCHAR;
 typedef unsigned long ULONG;
 typedef unsigned long DWORD;
 typedef unsigned long long ULONGLONG;
 typedef unsigned long long SIZE_T;
+typedef SIZE_T* PSIZE_T;
+typedef unsigned long long ULONG_PTR;
 typedef long LONG;
 typedef long NTSTATUS;
 typedef void* HANDLE;
@@ -83,6 +118,8 @@ typedef HANDLE* PHANDLE;
 typedef ULONG* PULONG;
 typedef ULONGLONG* PULONGLONG;
 typedef UCHAR* PUCHAR;
+typedef USHORT* PUSHORT;
+typedef LONG* PLONG;
 
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 
@@ -267,7 +304,27 @@ typedef struct _SYSTEM_MODULE_INFORMATION {
     SYSTEM_MODULE_ENTRY Modules[1];
 } SYSTEM_MODULE_INFORMATION;
 
-// INI & Config Structures
+// ============================================================================
+// OFFSET SOURCE — controls how ntoskrnl offsets are resolved at runtime.
+//
+//   AUTO    : use INI offsets when present; fall back to heuristic scanner.
+//   SCAN    : always scan ntoskrnl.exe on disk regardless of INI values.
+//   PDB     : use offsets pre-written by kvc.exe from a cached PDB (fastest).
+//   PDB_SCAN: PDB first; scanner as fallback if PDB lookup failed.
+//
+// kvc.exe sets PDB after a successful PDB resolution and writes offsets to
+// drivers.ini, so the next boot typically runs in PDB mode with zero scan cost.
+// ============================================================================
+#define OFFSET_SOURCE_AUTO     0
+#define OFFSET_SOURCE_SCAN     1
+#define OFFSET_SOURCE_PDB      2
+#define OFFSET_SOURCE_PDB_SCAN 3
+
+// ============================================================================
+// INI STRUCTURES — parsed from [Config] section and per-driver sections.
+// ============================================================================
+
+// Action to perform for a driver entry (maps to Action= key in drivers.ini).
 typedef enum _ACTION_TYPE {
     ACTION_LOAD = 0,
     ACTION_UNLOAD = 1,
@@ -275,32 +332,35 @@ typedef enum _ACTION_TYPE {
     ACTION_DELETE = 3
 } ACTION_TYPE;
 
+// Global settings from [Config] section.
 typedef struct _CONFIG_SETTINGS {
-    BOOLEAN Execute;
-    BOOLEAN RestoreHVCI;
-    BOOLEAN Verbose;
-    WCHAR DriverDevice[MAX_PATH_LEN];
-    ULONG IoControlCode_Read;
-    ULONG IoControlCode_Write;
-    ULONGLONG Offset_SeCiCallbacks;
-    ULONGLONG Offset_Callback;
-    ULONGLONG Offset_SafeFunction;
+    BOOLEAN Execute;                    // YES/NO: master switch; NO exits immediately
+    BOOLEAN RestoreHVCI;                // YES/NO: re-enable HVCI in hive after run
+    BOOLEAN Verbose;                    // YES/NO: enable NtDisplayString output
+    WCHAR DriverDevice[MAX_PATH_LEN];   // device path for the vulnerability driver
+    ULONG IoControlCode_Read;           // IOCTL code for physical memory read
+    ULONG IoControlCode_Write;          // IOCTL code for physical memory write
+    ULONG OffsetSource;                 // OFFSET_SOURCE_* constant
+    ULONGLONG Offset_SeCiCallbacks;     // RVA of SeCiCallbacks in ntoskrnl
+    ULONGLONG Offset_Callback;          // offset of the patchable slot within SeCiCallbacks
+    ULONGLONG Offset_SafeFunction;      // RVA of the no-op safe function in ntoskrnl
 } CONFIG_SETTINGS, *PCONFIG_SETTINGS;
 
+// Per-driver entry, one per named section in drivers.ini.
 typedef struct _INI_ENTRY {
-    ACTION_TYPE Action;
-    WCHAR ServiceName[MAX_PATH_LEN];
-    WCHAR DisplayName[MAX_PATH_LEN];
-    WCHAR ImagePath[MAX_PATH_LEN];
-    WCHAR DriverType[16];
-    WCHAR StartType[16];
-    BOOLEAN CheckIfLoaded;
-    BOOLEAN AutoPatch;
-    WCHAR SourcePath[MAX_PATH_LEN];
-    WCHAR TargetPath[MAX_PATH_LEN];
-    BOOLEAN ReplaceIfExists;
-    WCHAR DeletePath[MAX_PATH_LEN];
-    BOOLEAN RecursiveDelete;
+    ACTION_TYPE Action;                 // LOAD / UNLOAD / RENAME / DELETE
+    WCHAR ServiceName[MAX_PATH_LEN];    // SCM service key name
+    WCHAR DisplayName[MAX_PATH_LEN];    // human-readable label (defaults to ServiceName)
+    WCHAR ImagePath[MAX_PATH_LEN];      // NT path to the driver binary
+    WCHAR DriverType[16];               // KERNEL or FILE_SYSTEM (maps to Type DWORD)
+    WCHAR StartType[16];                // BOOT/SYSTEM/AUTO/DEMAND/DISABLED
+    BOOLEAN CheckIfLoaded;              // skip LOAD if already present in module list
+    BOOLEAN AutoPatch;                  // use DSE bypass sequence instead of direct load
+    WCHAR SourcePath[MAX_PATH_LEN];     // source path for RENAME operation
+    WCHAR TargetPath[MAX_PATH_LEN];     // target path for RENAME operation
+    BOOLEAN ReplaceIfExists;            // overwrite target if present (RENAME)
+    WCHAR DeletePath[MAX_PATH_LEN];     // path to delete (DELETE)
+    BOOLEAN RecursiveDelete;            // descend into subdirectories (DELETE)
 } INI_ENTRY, *PINI_ENTRY;
 
 // Other Structs
@@ -335,7 +395,18 @@ typedef struct _KEY_VALUE_PARTIAL_INFORMATION {
 
 #define KeyValuePartialInformation 2
 
-// NT API Imports
+#define PAGE_READWRITE 0x04
+#define MEM_COMMIT 0x00001000
+#define MEM_RESERVE 0x00002000
+#define MEM_RELEASE 0x00008000
+
+// ============================================================================
+// NT API IMPORTS
+// All imported directly from ntdll.dll via __declspec(dllimport).
+// No wrappers — raw syscall signatures as exported by ntdll on x64.
+// ============================================================================
+__declspec(dllimport) NTSTATUS NTAPI NtAllocateVirtualMemory(HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, PSIZE_T RegionSize, ULONG AllocationType, ULONG Protect);
+__declspec(dllimport) NTSTATUS NTAPI NtFreeVirtualMemory(HANDLE ProcessHandle, PVOID* BaseAddress, PSIZE_T RegionSize, ULONG FreeType);
 __declspec(dllimport) NTSTATUS NTAPI NtQueryInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation, ULONG Length, ULONG FileInformationClass);
 __declspec(dllimport) NTSTATUS NTAPI NtOpenKey(PHANDLE KeyHandle, ULONG DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes);
 __declspec(dllimport) NTSTATUS NTAPI NtQueryValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName, ULONG KeyValueInformationClass, PVOID KeyValueInformation, ULONG Length, PULONG ResultLength);

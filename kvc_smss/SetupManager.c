@@ -1,3 +1,27 @@
+// ============================================================================
+// SetupManager — HVCI hive patching, DriverStore enumeration, cleanup
+//
+// HVCI PATCH STRATEGY:
+//   Windows cannot disable HVCI through the registry key alone while the
+//   system is running — the change only takes effect if the SYSTEM hive is
+//   modified offline before the next boot.  PatchSystemHiveHVCI opens the
+//   live hive file (\SystemRoot\System32\config\SYSTEM) as a raw binary and
+//   rewrites the Enabled VK cell inline, bypassing the registry lock.
+//   This is safe at SMSS phase because the hive is not yet mapped read-only.
+//
+//   NK/VK walkthrough (chunked, 1 MB at a time):
+//     1. Search chunk for the "HypervisorEnforcedCodeIntegrity" NK name.
+//     2. Validate the NK cell signature ("nk" bytes before the name).
+//     3. Read the NK values list offset and walk each VK.
+//     4. Find the VK whose name is "Enabled" (ASCII or Unicode).
+//     5. Verify the data type is REG_DWORD with inline storage (0x80000004).
+//     6. Seek to the inline payload field (+12 from VK start) and write newValue.
+//     7. Read back the written byte to verify the disk write succeeded.
+//
+//   The 256-byte overlap between chunks prevents missing a match that straddles
+//   a 1 MB boundary.
+// ============================================================================
+
 #include "SetupManager.h"
 
 extern PWSTR MmGetPoolDiagnosticString(void);
@@ -6,18 +30,57 @@ extern PWSTR MmGetPoolDiagnosticString(void);
 #define SCAN_CHUNK_SIZE (1024 * 1024)
 // Safety margin keeps the full NK header available when a match lands near a chunk edge.
 #define OVERLAP_SIZE    (256)
-#define HIVE_BIN_BASE   (0x1000ULL)
-#define HIVE_MAX_VALUES (256)
-#define HIVE_NK_NAME_OFFSET          (0x4C)
-#define HIVE_NK_VALUES_COUNT_DELTA   (40)
-#define HIVE_NK_VALUES_LIST_DELTA    (36)
+// All offsets are relative to the start of the hive bin data (after the 0x1000-byte
+// base header).  These values are derived from the Windows registry hive on-disk
+// format (documented in libregf / reglookup research).
+#define HIVE_BIN_BASE   (0x1000ULL)    // hive bins begin after the base block
+#define HIVE_MAX_VALUES (256)           // sanity cap on values per key
+#define HIVE_NK_NAME_OFFSET          (0x4C)   // byte offset of KeyName within an NK cell
+#define HIVE_NK_VALUES_COUNT_DELTA   (40)     // bytes before KeyName → ValuesCount field
+#define HIVE_NK_VALUES_LIST_DELTA    (36)     // bytes before KeyName → ValuesListOffset field
+// Inline REG_DWORD: high bit of DataLength set + DataLength == 4.
+// The actual DWORD payload is stored in the DataOffset field of the VK cell.
 #define HIVE_VK_INLINE_DWORD         (0x80000000UL | sizeof(ULONG))
-#define HIVE_VK_FIXED_SIZE           (24)
+#define HIVE_VK_FIXED_SIZE           (24)     // fixed header size of a VK cell
 
 // ============================================================================
 // DRIVERSTORE ENUMERATION
+// Locates kvc.sys in the Windows Driver Store.
+// The package directory is named "avc.inf_amd64_<hash>" — enumerated with a
+// wildcard filter rather than hardcoding the content hash.
 // ============================================================================
 
+// Probe whether path names an existing file or directory by opening it
+// with FILE_READ_ATTRIBUTES (requires no lock, works on locked files).
+static BOOLEAN FileExists(PCWSTR path) {
+    UNICODE_STRING usPath;
+    OBJECT_ATTRIBUTES oa;
+    IO_STATUS_BLOCK iosb;
+    HANDLE hFile = NULL;
+    NTSTATUS status;
+
+    RtlInitUnicodeString(&usPath, path);
+    InitializeObjectAttributes(&oa, &usPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    status = NtOpenFile(&hFile,
+                        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        &oa, &iosb,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(status)) {
+        return FALSE;
+    }
+
+    NtClose(hFile);
+    return TRUE;
+}
+
+// Searches DriverStore\FileRepository for a directory matching "avc.inf_amd64_*"
+// then verifies that kvc.sys exists inside it.
+// outPath receives the full NT path (e.g. \SystemRoot\System32\DriverStore\
+//   FileRepository\avc.inf_amd64_<hash>\kvc.sys) on success.
+// Returns FALSE if the DriverStore directory cannot be opened or the pattern
+// has no match (package not staged).
 BOOLEAN FindKvcSysInDriverStore(PWSTR outPath, SIZE_T outPathLen) {
     static UCHAR dirBuffer[4096];
     UNICODE_STRING usRepoPath, usPattern;
@@ -89,14 +152,53 @@ BOOLEAN FindKvcSysInDriverStore(PWSTR outPath, SIZE_T outPathLen) {
 
     wcscat_safe(outPath, outPathLen, suffix);
 
+    if (!FileExists(outPath)) {
+        outPath[0] = 0;
+        DEBUG_LOG(L"FAILED: kvc.sys missing inside DriverStore candidate directory\r\n");
+        return FALSE;
+    }
+
     DEBUG_LOG(L"INFO: kvc.sys found in DriverStore\r\n");
     return TRUE;
 }
 
+// Returns the NT path to kvc.sys, preferring the DriverStore location.
+// Falls back to \SystemRoot\System32\drivers\kvc.sys if the package is not
+// staged — this is the manual-copy deployment path used during development.
+BOOLEAN FindKvcSysPath(PWSTR outPath, SIZE_T outPathLen) {
+    static const WCHAR fallbackPath[] = L"\\SystemRoot\\System32\\drivers\\kvc.sys";
+
+    if (!outPath || outPathLen == 0) {
+        return FALSE;
+    }
+
+    if (FindKvcSysInDriverStore(outPath, outPathLen)) {
+        return TRUE;
+    }
+
+    if (wcscpy_safe(outPath, outPathLen, fallbackPath) >= outPathLen) {
+        DEBUG_LOG(L"FAILED: Fallback kvc.sys path too long\r\n");
+        return FALSE;
+    }
+
+    if (FileExists(outPath)) {
+        DEBUG_LOG(L"INFO: kvc.sys found in System32\\drivers\r\n");
+    } else {
+        DEBUG_LOG(L"INFO: Using System32\\drivers fallback for kvc.sys\r\n");
+    }
+
+    return TRUE;
+}
+
 // ============================================================================
-// POST-LOAD CLEANUP - registry key only (no temp file to delete)
+// POST-LOAD CLEANUP
+// Deletes the kvc.sys SCM registry key after the driver has been unloaded.
+// The key is identified via MmGetPoolDiagnosticString (obfuscated service name)
+// so no plaintext service name appears in the binary.
 // ============================================================================
 
+// Deletes HKLM\...\Services\<obfuscated-name> left by ExecuteAutoPatchLoad.
+// Idempotent: if the key is already gone, returns STATUS_SUCCESS.
 NTSTATUS CleanupOmniDriver(void) {
     WCHAR fullServicePath[MAX_PATH_LEN];
     UNICODE_STRING usServiceName;
@@ -130,6 +232,9 @@ NTSTATUS CleanupOmniDriver(void) {
     return STATUS_SUCCESS;
 }
 
+// Naive exact byte-pattern search.  Returns the offset of the first match
+// within buffer[0..bufferSize-1], or (SIZE_T)-1 if not found.
+// Used for the NK key-name search in the hive scanner.
 SIZE_T FindPatternInBuffer(PUCHAR buffer, SIZE_T bufferSize, PUCHAR pattern, SIZE_T patternSize) {
     for (SIZE_T i = 0; i <= bufferSize - patternSize; i++) {
         BOOLEAN match = TRUE;
@@ -156,6 +261,11 @@ static USHORT ReadLeUshort(PUCHAR buffer) {
                     ((ULONG)buffer[1] << 8));
 }
 
+// Returns TRUE if the VK cell name is "Enabled".
+// Handles both narrow (ASCII, flags bit 0 set) and wide (Unicode, flags bit 0
+// clear) name encoding — the SYSTEM hive uses narrow names, but the function
+// accepts either for robustness.
+// bytesAvailable is the number of valid bytes in vkBuffer starting from byte 0.
 static BOOLEAN VkNameMatchesEnabled(PUCHAR vkBuffer, ULONG bytesAvailable, USHORT nameLength, USHORT flags) {
     static const char enabledName[] = "Enabled";
 
@@ -191,6 +301,16 @@ static BOOLEAN VkNameMatchesEnabled(PUCHAR vkBuffer, ULONG bytesAvailable, USHOR
 // HIVE PATCHING (CHUNKED NK/VK WALK)
 // ============================================================================
 
+// Patches the HypervisorEnforcedCodeIntegrity\Enabled DWORD in the live SYSTEM
+// hive file.  enable=TRUE sets value to 1 (re-enable HVCI on next boot);
+// enable=FALSE sets value to 0 (disable HVCI on next boot).
+//
+// Returns TRUE if at least one VK was successfully patched or was already at
+// the requested value.  Returns FALSE if the pattern is not found or I/O fails.
+//
+// NOTE: The hive file is written directly at the physical record level.
+// Any in-memory registry views are NOT updated — the change takes effect only
+// after a reboot when the kernel mounts the hive fresh from disk.
 BOOLEAN PatchSystemHiveHVCI(BOOLEAN enable) {
     UNICODE_STRING usFilePath;
     OBJECT_ATTRIBUTES oa;
@@ -446,6 +566,13 @@ BOOLEAN PatchSystemHiveHVCI(BOOLEAN enable) {
 // MAIN HVCI CONTROL LOGIC
 // ============================================================================
 
+// Reads the live DeviceGuard registry key to determine whether HVCI is active.
+// If Enabled==1: patches the SYSTEM hive, then triggers a reboot via
+// NtShutdownSystem(1).  Returns TRUE if a reboot was initiated or is in
+// progress (caller must terminate); FALSE if HVCI was not active.
+//
+// A return value of TRUE means the caller must not proceed with DSE bypass —
+// the system will reboot and on the next boot HVCI will be disabled.
 BOOLEAN CheckAndDisableHVCI(void) {
     UNICODE_STRING usKeyPath, usValueName;
     OBJECT_ATTRIBUTES oa;
@@ -522,6 +649,8 @@ BOOLEAN CheckAndDisableHVCI(void) {
     return FALSE;
 }
 
+// Patches the SYSTEM hive to re-enable HVCI (Enabled=1) for the next boot.
+// Called after all driver operations complete when RestoreHVCI=YES.
 NTSTATUS RestoreHVCI(void) {
     DisplayMessage(L"INFO: Re-enabling HVCI for next boot...\r\n");
 
@@ -534,6 +663,10 @@ NTSTATUS RestoreHVCI(void) {
     return STATUS_SUCCESS;
 }
 
+// Updates the live (volatile) DeviceGuard registry key Enabled value.
+// This is a cosmetic operation — it makes Security Center and system tools
+// report the correct HVCI state without waiting for a reboot.
+// The physical hive file is not affected; PatchSystemHiveHVCI handles that.
 NTSTATUS SetHVCIRegistryFlag(BOOLEAN enable) {
     UNICODE_STRING usKeyPath, usValueName;
     OBJECT_ATTRIBUTES oa;

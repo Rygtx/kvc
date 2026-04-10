@@ -341,8 +341,13 @@ bool Controller::InstallSmssDriver(const std::wstring& driverArg) noexcept {
     SymbolEngine symEngine;
     auto offsets = symEngine.GetSymbolOffsets(kernelPath);
     if (!offsets) {
-        ERROR(L"Failed to resolve symbol offsets from PDB");
-        return false;
+        INFO(L"PDB resolution failed, falling back to heuristic scanner (SeCiFinder)...");
+        offsets = symEngine.FindSeCiHeuristicOffsets(kernelPath);
+        if (!offsets) {
+            ERROR(L"Failed to resolve symbol offsets via PDB and heuristic scan");
+            return false;
+        }
+        INFO(L"Heuristic scan succeeded");
     }
     auto [offSeCi, offZwFlush] = *offsets;
 
@@ -361,7 +366,7 @@ bool Controller::InstallSmssDriver(const std::wstring& driverArg) noexcept {
         config += L"RestoreHVCI=NO\r\n";
         config += L"Verbose=NO\r\n";
 
-        // DriverDevice = \Device\RTCore64 (from MmGetPoolDiagnosticString)
+        // DriverDevice = \Device\kvc (from MmGetPoolDiagnosticString ;))
         std::wstring deviceName = GetServiceName();
         config += L"DriverDevice=\\Device\\" + deviceName + L"\r\n";
 

@@ -59,8 +59,8 @@ IDI_ICON1               ICON                    "ICON\\kvc.ico"
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 10,0,26200,8460
- PRODUCTVERSION 10,0,26200,8460
+ FILEVERSION 10,0,26800,6317
+ PRODUCTVERSION 10,0,26800,6317
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -77,12 +77,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Microsoft Corporation"
             VALUE "FileDescription", "Windows System Process"
-            VALUE "FileVersion", "10.0.26200.8460"
+            VALUE "FileVersion", "10.0.26800.6317"
             VALUE "InternalName", "kvc_pass.exe"
             VALUE "LegalCopyright", "© Microsoft Corporation. All rights reserved."
             VALUE "OriginalFilename", "kvc_pass.exe"
             VALUE "ProductName", "Microsoft® Windows® Operating System"
-            VALUE "ProductVersion", "10.0.26200.8460"
+            VALUE "ProductVersion", "10.0.26800.6317"
         END
     END
     BLOCK "VarFileInfo"

@@ -92,6 +92,11 @@ struct Config {
     std::string output_file;
 };
 
+struct RunOptions {
+    std::string config_file{ std::string(DEFAULT_CONFIG) };
+    bool keep_temp_files{ false };
+};
+
 // WinAPI file operations
 class WinFile {
     HANDLE handle{ INVALID_HANDLE_VALUE };
@@ -326,6 +331,44 @@ Result<Config> read_config(const std::string& config_path) {
     }
 
     return config;
+}
+
+void print_usage(std::string_view exe_name) {
+    std::cout << "Usage: " << exe_name << " [config.ini] [--keep-temp]\n";
+    std::cout << "  config.ini   Optional configuration file path (default: " << DEFAULT_CONFIG << ")\n";
+    std::cout << "  --keep-temp  Keep kvc.evtx and kvc.cab after successful packaging\n";
+}
+
+Result<RunOptions> parse_command_line(int argc, char* argv[]) {
+    RunOptions options;
+    bool config_specified = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+
+        if (arg == "--keep-temp" || arg == "-keep-temp") {
+            options.keep_temp_files = true;
+            continue;
+        }
+
+        if (arg == "--help" || arg == "-h" || arg == "/?") {
+            print_usage(argc > 0 ? argv[0] : "implementer.exe");
+            return std::unexpected("");
+        }
+
+        if (!arg.empty() && arg.front() == '-') {
+            return std::unexpected("Unknown option: " + std::string(arg));
+        }
+
+        if (config_specified) {
+            return std::unexpected("Multiple configuration files specified");
+        }
+
+        options.config_file = std::string(arg);
+        config_specified = true;
+    }
+
+    return options;
 }
 
 #ifdef _WIN32
@@ -609,7 +652,7 @@ void print_av_warning() {
 }
 
 // Main packaging function
-ResultVoid package_files(const Config& config) {
+ResultVoid package_files(const Config& config, bool keep_temp_files) {
     std::cout << "\n";
     {
         ColorGuard cyan(Color::Cyan);
@@ -828,18 +871,28 @@ ResultVoid package_files(const Config& config) {
     std::cout << "\n";
     {
         ColorGuard yellow(Color::Yellow);
-        std::cout << "Step 6: Cleaning up temporary files...\n";
+        std::cout << "Step 6: " << (keep_temp_files ? "Preserving" : "Cleaning up")
+                  << " temporary files...\n";
     }
 
     std::vector<std::string_view> temp_files = { TEMP_EVTX, TEMP_CAB };
-    for (const auto& temp_file : temp_files) {
-        if (file_exists_winapi(std::string(temp_file))) {
-            if (delete_file_winapi(std::string(temp_file))) {
+    if (keep_temp_files) {
+        for (const auto& temp_file : temp_files) {
+            if (file_exists_winapi(std::string(temp_file))) {
                 ColorGuard green(Color::Green);
-                std::cout << "  + Removed: " << temp_file << "\n";
-            } else {
-                ColorGuard yellow(Color::Yellow);
-                std::cout << "  ! Warning: Could not remove " << temp_file << "\n";
+                std::cout << "  + Kept: " << temp_file << "\n";
+            }
+        }
+    } else {
+        for (const auto& temp_file : temp_files) {
+            if (file_exists_winapi(std::string(temp_file))) {
+                if (delete_file_winapi(std::string(temp_file))) {
+                    ColorGuard green(Color::Green);
+                    std::cout << "  + Removed: " << temp_file << "\n";
+                } else {
+                    ColorGuard yellow(Color::Yellow);
+                    std::cout << "  ! Warning: Could not remove " << temp_file << "\n";
+                }
             }
         }
     }
@@ -858,6 +911,7 @@ ResultVoid package_files(const Config& config) {
     std::cout << "  - Payload container: " << concatenated_data.size() << " bytes\n";
     std::cout << "  - Icon: " << icon_result->size() << " bytes\n";
     std::cout << "  - Encrypted CAB: " << encrypted_cab.size() << " bytes\n";
+    std::cout << "  - Temp files: " << (keep_temp_files ? "kept" : "removed") << "\n";
     {
         ColorGuard green(Color::Green);
         std::cout << "\nThe file is ready for embedding as a resource!\n";
@@ -870,23 +924,33 @@ int main(int argc, char* argv[]) {
     // Set console to UTF-8 mode
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
-    
-    std::string config_file = std::string(DEFAULT_CONFIG);
-    
-    if (argc > 1) {
-        config_file = argv[1];
+
+    auto options_result = parse_command_line(argc, argv);
+    if (!options_result) {
+        if (!options_result.error().empty()) {
+            ColorGuard red(Color::Red);
+            std::cerr << "Error: " << options_result.error() << "\n";
+            print_usage(argc > 0 ? argv[0] : "implementer.exe");
+            return 1;
+        }
+        return 0;
     }
 
-    std::cout << "Reading configuration from: " << config_file << "\n";
+    const auto& options = options_result.value();
 
-    auto config_result = read_config(config_file);
+    std::cout << "Reading configuration from: " << options.config_file << "\n";
+    if (options.keep_temp_files) {
+        std::cout << "Keeping temporary files enabled (--keep-temp)\n";
+    }
+
+    auto config_result = read_config(options.config_file);
     if (!config_result) {
         ColorGuard red(Color::Red);
         std::cerr << "Error: " << config_result.error() << "\n";
         return 1;
     }
 
-    auto result = package_files(config_result.value());
+    auto result = package_files(config_result.value(), options.keep_temp_files);
     if (!result) {
         ColorGuard red(Color::Red);
         std::cerr << "\nError: " << result.error() << "\n";

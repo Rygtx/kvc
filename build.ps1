@@ -199,6 +199,13 @@ try {
         }
     }
 
+    # ── Remove obj\ intermediate directory ──────────────────────────────────
+    $objRoot = Join-Path $ProjectRoot "obj"
+    if (Test-Path -LiteralPath $objRoot) {
+        Remove-Item -LiteralPath $objRoot -Recurse -Force
+        Write-Step "Removed build tree: obj\"
+    }
+
     # ── Stamp ALL bin\ files to fixed timestamp ──────────────────────────────
     $binFiles = Get-ChildItem -LiteralPath $BinDir -File
     if ($binFiles) {

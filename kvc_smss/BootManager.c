@@ -1,7 +1,29 @@
-#include "BootManager.h"
+// ============================================================================
+// BootManager — NATIVE entry point and main execution loop
+//
+// NtProcessStartup is invoked directly by the NT kernel during SMSS phase.
+// Responsibilities:
+//   1. Elevate process privileges (SeLoadDriver, SeBackup, SeRestore, SeShutdown)
+//   2. Load and parse drivers.ini from \SystemRoot\
+//   3. Resolve kernel offsets (INI / scanner)
+//   4. Disable HVCI if active (patches SYSTEM hive, then reboots)
+//   5. Execute driver actions: LOAD (with or without DSE bypass), UNLOAD,
+//      RENAME, DELETE
+//   6. Optionally restore HVCI hive entry and set cosmetic registry flag
+//
+// g_OriginalCallback holds the DSE callback address saved before patching.
+// It survives across reboot by being written to [DSE_STATE] in drivers.ini.
+// ============================================================================
 
+#include "BootManager.h"
+#include "OffsetFinder.h"
+
+// Saved SeCiCallbacks slot value before DSE patching.
+// Populated by ExecuteAutoPatchLoad; persisted to drivers.ini across reboots.
 static ULONGLONG g_OriginalCallback = 0;
 
+// Main entry point for the NATIVE subsystem process.
+// Peb: pointer to the process PEB (unused; SMSS passes a minimal structure).
 __declspec(noreturn) void __stdcall NtProcessStartup(void* Peb) {
     INI_ENTRY entries[MAX_ENTRIES];
     CONFIG_SETTINGS config;
@@ -25,10 +47,45 @@ __declspec(noreturn) void __stdcall NtProcessStartup(void* Peb) {
 
     // Parse INI entries and global config
     entryCount = ParseIniFile(iniContent, entries, MAX_ENTRIES, &config);
+    FreeIniFileBuffer(iniContent);
+    iniContent = NULL;
 
     // Apply verbose mode from config (must be set before any further DisplayMessage calls)
     g_VerboseMode = config.Verbose;
     DisplayMessage(L"BootBypass - Modular Driver Loader\r\n====================================\r\n");
+
+    if (g_VerboseMode) {
+        WCHAR hexBuf[32];
+        DisplayMessage(L"INFO: Offsets from INI:\r\n");
+        ULONGLONGToHexString(config.Offset_SeCiCallbacks, hexBuf, TRUE);
+        DisplayMessage(L"  SeCiCallbacks = "); DisplayMessage(hexBuf); DisplayMessage(L"\r\n");
+        ULONGLONGToHexString(config.Offset_Callback, hexBuf, TRUE);
+        DisplayMessage(L"  Callback     = "); DisplayMessage(hexBuf); DisplayMessage(L"\r\n");
+        ULONGLONGToHexString(config.Offset_SafeFunction, hexBuf, TRUE);
+        DisplayMessage(L"  SafeFunction = "); DisplayMessage(hexBuf); DisplayMessage(L"\r\n");
+    }
+
+    // OFFSET_SOURCE_SCAN: always run heuristic scanner regardless of INI offsets.
+    // OFFSET_SOURCE_AUTO (default): run scanner only if INI offsets are missing.
+    // PDB mode (set by kvc.exe after a successful PDB lookup) writes offsets to INI
+    // and the scanner is skipped entirely on the next boot.
+    if (config.OffsetSource == OFFSET_SOURCE_SCAN ||
+        config.Offset_SeCiCallbacks == 0 || config.Offset_SafeFunction == 0) {
+        if (config.OffsetSource == OFFSET_SOURCE_SCAN) {
+            DisplayAlwaysMessage(L"INFO: OffsetSource=SCAN, forcing heuristic scanner\r\n");
+        }
+        FindKernelOffsetsLocally(&config);
+        if (g_VerboseMode) {
+            WCHAR hexBuf[32];
+            DisplayMessage(L"INFO: Offsets after local scan:\r\n");
+            ULONGLONGToHexString(config.Offset_SeCiCallbacks, hexBuf, TRUE);
+            DisplayMessage(L"  SeCiCallbacks = "); DisplayMessage(hexBuf); DisplayMessage(L"\r\n");
+            ULONGLONGToHexString(config.Offset_Callback, hexBuf, TRUE);
+            DisplayMessage(L"  Callback     = "); DisplayMessage(hexBuf); DisplayMessage(L"\r\n");
+            ULONGLONGToHexString(config.Offset_SafeFunction, hexBuf, TRUE);
+            DisplayMessage(L"  SafeFunction = "); DisplayMessage(hexBuf); DisplayMessage(L"\r\n");
+        }
+    }
 
     // Check if execution is enabled in config
     if (!config.Execute) {
@@ -111,11 +168,13 @@ __declspec(noreturn) void __stdcall NtProcessStartup(void* Peb) {
 
     DisplayMessage(L"\r\n====================================\r\n");
 
-    // Restore HVCI in SYSTEM hive if configured.
+    // Restore HVCI in the SYSTEM hive so that the next boot re-enables Memory
+    // Integrity.  Only done when RestoreHVCI=YES and no HVCI reboot is pending.
     if (!skipPatch && config.RestoreHVCI) RestoreHVCI();
 
-    // Only mirror the live registry flag when restoration is enabled.
-    // With RestoreHVCI=NO the caller expects Enabled=0 to remain in the hive.
+    // Mirror the live value back into the volatile DeviceGuard registry key so
+    // that Security Center and system tools report HVCI as enabled.
+    // Skipped when RestoreHVCI=NO — caller expects the Enabled=0 value to stay.
     if (!skipPatch && config.RestoreHVCI) {
         DisplayMessage(L"INFO: Setting cosmetic HVCI registry flag...\r\n");
         if (NT_SUCCESS(SetHVCIRegistryFlag(TRUE))) {

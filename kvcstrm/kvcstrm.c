@@ -566,6 +566,74 @@ NTSTATUS ForceCloseHandle(PKERNEL_CLOSE_HANDLE_REQUEST Req)
 }
 
 // =============================================================
+// KERNEL CALL PRIMITIVE
+// =============================================================
+
+// Casts Address to a four-argument x64 function pointer and calls it with
+// Args[0..3] mapped to RCX, RDX, R8, R9.  The return value is written back
+// to Req->ReturnValue.
+//
+// This is a raw call primitive.  The two checks below are sanity guards
+// against trivially wrong usage, NOT safety guarantees:
+//
+//   1. Address >= 0xFFFF800000000000: rejects user-mode addresses to prevent
+//      SMEP-bypass via this path.  It does NOT validate that the target is a
+//      correct entry point, has a matching prototype, or is safe to call in
+//      the current context.  Wrong IRQL, wrong PreviousMode, wrong process/
+//      thread attachment, lock-ordering violations, or bad side effects in the
+//      callee can all still result in a bugcheck.
+//
+//   2. MmIsAddressValid: confirms only that the first byte of Address is
+//      currently mapped in the kernel page tables.  It does NOT verify that
+//      the target is non-pageable (a paged routine called above APC_LEVEL will
+//      bugcheck), that it is a valid entry point, or that subsequent memory
+//      accesses made by the callee won't fault.
+//
+//   3. __try/__except catches hardware exceptions (AV, GPF) on the call site
+//      itself.  It does NOT protect against: bugchecks asserted by the callee
+//      or the kernel subsystems it invokes, IRQL violations, deadlocks,
+//      corruption of kernel state, DPC watchdog expiry, or any partially
+//      executed side effects that occurred before the fault.
+//
+//   4. The 4-argument model covers the x64 register set (RCX/RDX/R8/R9).
+//      Many kernel routines require more than register arguments: a specific
+//      IRQL, prior KeStackAttachProcess, a held lock, a live object reference,
+//      or buffers from a specific address space.  Those preconditions are the
+//      sole responsibility of the caller.
+//
+// IRQL: dispatched at PASSIVE_LEVEL by the sequential KMDF queue.  Most
+// exported Nt/Zw/Ex/Mm routines are safe at PASSIVE_LEVEL; Ke/DISPATCH-level
+// routines must be called from shellcode that raises IRQL itself.
+
+NTSTATUS CallKernelAddress(PKERNEL_CALL_REQUEST Req)
+{
+    typedef ULONG64 (*PFUNC_CALL)(ULONG64, ULONG64, ULONG64, ULONG64);
+    PFUNC_CALL pfn;
+
+    if (!Req || Req->Address == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    // Reject user-space addresses -- prevents SMEP-bypass attempts and
+    // limits the primitive to kernel virtual address space only.
+    if (Req->Address < 0xFFFF800000000000ULL)
+        return STATUS_ACCESS_DENIED;
+
+    if (!MmIsAddressValid((PVOID)Req->Address))
+        return STATUS_INVALID_ADDRESS;
+
+    pfn = (PFUNC_CALL)(ULONG_PTR)Req->Address;
+
+    __try {
+        Req->ReturnValue = pfn(Req->Args[0], Req->Args[1], Req->Args[2], Req->Args[3]);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Req->ReturnValue = 0;
+        return GetExceptionCode();
+    }
+
+    return STATUS_SUCCESS;
+}
+
+// =============================================================
 // IOCTL DISPATCHER
 // =============================================================
 
@@ -768,6 +836,19 @@ VOID EvtIoDeviceControl(
             req->Status = ForceCloseHandle(req);
             status = STATUS_SUCCESS;
             bytesReturned = sizeof(KERNEL_CLOSE_HANDLE_REQUEST);
+            break;
+        }
+
+        // ---- Kernel call primitive -----------------------------
+
+        case IOCTL_CALL_KERNEL: {
+            if (InputBufferLength < sizeof(KERNEL_CALL_REQUEST)) {
+                status = STATUS_BUFFER_TOO_SMALL; break;
+            }
+            PKERNEL_CALL_REQUEST req = (PKERNEL_CALL_REQUEST)inBuf;
+            req->Status = CallKernelAddress(req);
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(KERNEL_CALL_REQUEST);
             break;
         }
 

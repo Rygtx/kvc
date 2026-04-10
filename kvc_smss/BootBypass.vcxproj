@@ -68,6 +68,7 @@
     <ClCompile Include="BootManager.c" />
 	<ClCompile Include="DriverManager.c" />
     <ClCompile Include="FileManager.c" />
+    <ClCompile Include="OffsetFinder.c" />
     <ClCompile Include="SecurityPatcher.c" />
     <ClCompile Include="SetupManager.c" />
 	<ClCompile Include="SystemUtils.c" />
@@ -76,6 +77,7 @@
     <ClInclude Include="BootBypass.h" />
     <ClInclude Include="BootManager.h" />
     <ClInclude Include="DriverManager.h" />
+    <ClInclude Include="OffsetFinder.h" />
     <ClInclude Include="FileManager.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="SecurityPatcher.h" />

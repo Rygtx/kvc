@@ -1075,11 +1075,22 @@ bool SplitKvcEvtx(const std::vector<BYTE>& kvcData,
         return false;
     }
 
-    // Find all MZ signatures (PE headers)
+    // Find all valid MZ signatures (PE headers) by verifying the PE signature
     std::vector<size_t> peOffsets;
     for (size_t i = 0; i < kvcData.size() - 1; i++) {
         if (kvcData[i] == 0x4D && kvcData[i + 1] == 0x5A) {
-            peOffsets.push_back(i);
+            // Validate e_lfanew
+            if (i + 0x3C + sizeof(DWORD) <= kvcData.size()) {
+                DWORD e_lfanew = *reinterpret_cast<const DWORD*>(&kvcData[i + 0x3C]);
+                
+                // Sanity check for e_lfanew (usually < 0x1000) and check if PE signature exists
+                if (e_lfanew > 0 && e_lfanew < 0x1000 && i + e_lfanew + 4 <= kvcData.size()) {
+                    if (kvcData[i + e_lfanew] == 0x50 && kvcData[i + e_lfanew + 1] == 0x45 &&
+                        kvcData[i + e_lfanew + 2] == 0x00 && kvcData[i + e_lfanew + 3] == 0x00) {
+                        peOffsets.push_back(i);
+                    }
+                }
+            }
         }
     }
 

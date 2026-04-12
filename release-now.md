@@ -82,16 +82,33 @@ irm https://kvc.pl/run | iex
 ## ✅ WHAT'S NEW — ${DATE}
 
 <details>
-<summary><strong>[12.04.2026] KvcForensic — LSASS minidump credential extraction (kvc analyze)</strong></summary>
+<summary><strong>[12.04.2026] kvcforensic.dat — LSASS minidump credential extraction via KvcForensic</strong></summary>
 
-- `kvcforensic.dat` — new optional module (separate release asset); embeds `KvcForensic.exe` + `KvcForensic.json` (LSA structure offset templates), XOR-encrypted with the standard KVC key
-- `kvc analyze <dump>` — extracts credentials from any Windows minidump; `--format txt|json|both`, `--full`, `--tickets <dir>`
-- `kvc analyze lsass` — auto-locates LSASS dump in CWD and Downloads; prompts after `kvc dump lsass` if module is available
-- `kvc analyze --gui` — launches KvcForensic GUI; useful for interactive inspection
-- Auto-deploy: `kvc setup` deploys `kvcforensic.dat` from CWD to System32 when present (optional, non-fatal if absent)
-- On-demand download: if `kvcforensic.dat` is missing when `kvc analyze` is called, KVC prompts to download it automatically from GitHub
-- Same on-demand download for `kvc.dat` — if `kvc bp` or `kvc export secrets` is called and `kvc_pass.exe` is not deployed, KVC prompts to download `kvc.dat` and runs setup automatically
-- Built with KvcXor option 7; packed with `kvc_smss.exe` as fourth icon-embedded binary
+New optional module distributed as a separate release asset. Embeds [`KvcForensic.exe`](https://github.com/wesmar/KvcForensic) + `KvcForensic.json` (per-build LSA offset templates), XOR-encrypted with the standard KVC key.
+
+**Validated extraction targets:**
+
+| Windows version | Build range | Status |
+|---|---|---|
+| Windows 11 26H1 | 28000+ | Full |
+| Windows 11 25H2 | 26200–27999 | Full |
+| Windows 11 24H2 / Server 2025 | 26100–26199 | Full |
+| Windows 10 22H2 | 19045 | Legacy core decrypt |
+| Win11 23H2–22H2, Win10 1809–22H2 | 17763–26099 | Legacy path, limited validation |
+| Win10 1803 and earlier, 8.x, 7 | below 17763 | Template only / experimental |
+
+Packages: MSV1_0 (NT/LM/SHA1), WDigest (cleartext), Kerberos (sessions + tickets), DPAPI (master keys), CredMan.
+TSPKG and Kerberos ticket export (`.kirbi`/`.ccache`) are **in progress / experimental**.
+Full supported-builds table and architecture: [github.com/wesmar/KvcForensic](https://github.com/wesmar/KvcForensic)
+
+**Integration with kvc:**
+
+- `kvc analyze <dump>` — run KvcForensic CLI; `--format txt|json|both`, `--full`, `--tickets <dir>`
+- `kvc analyze lsass` — auto-locate LSASS dump in CWD then Downloads
+- `kvc analyze --gui` — launch KvcForensic GUI
+- `kvc setup` deploys `kvcforensic.dat` to System32 if present in CWD (optional)
+- If missing at runtime, `kvc analyze` prompts to download from GitHub automatically
+- Same auto-download for `kvc.dat`: missing `kvc_pass.exe` → prompt on `kvc bp` / `kvc export secrets`
 
 </details>
 

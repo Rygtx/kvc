@@ -7,11 +7,11 @@
 extern volatile bool g_interrupted;
 
 // Atomic memory dump operations with comprehensive process validation
-bool Controller::DumpProcess(DWORD pid, const std::wstring& outputPath) noexcept {
-    return CreateMiniDump(pid, outputPath);
+bool Controller::DumpProcess(DWORD pid, const std::wstring& outputPath, std::wstring* outDumpPath) noexcept {
+    return CreateMiniDump(pid, outputPath, outDumpPath);
 }
 
-bool Controller::DumpProcessByName(const std::wstring& processName, const std::wstring& outputPath) noexcept {
+bool Controller::DumpProcessByName(const std::wstring& processName, const std::wstring& outputPath, std::wstring* outDumpPath) noexcept {
     if (!PerformAtomicInitWithErrorCleanup()) {
         return false;
     }
@@ -32,17 +32,17 @@ bool Controller::DumpProcessByName(const std::wstring& processName, const std::w
         PerformAtomicCleanup();
         return false;
     }
-    
+
     auto match = matches[0];
     INFO(L"Found process: %s (PID %d)", match.ProcessName.c_str(), match.Pid);
-    
+
     PerformAtomicCleanup();
-    
-    return CreateMiniDump(match.Pid, outputPath);
+
+    return CreateMiniDump(match.Pid, outputPath, outDumpPath);
 }
 
 // Create comprehensive memory dump with protection elevation and Defender bypass
-bool Controller::CreateMiniDump(DWORD pid, const std::wstring& outputPath) noexcept {
+bool Controller::CreateMiniDump(DWORD pid, const std::wstring& outputPath, std::wstring* outDumpPath) noexcept {
     if (!PerformAtomicInit()) {
         return false;
     }
@@ -271,6 +271,7 @@ bool Controller::CreateMiniDump(DWORD pid, const std::wstring& outputPath) noexc
     }
 
     SUCCESS(L"Memory dump created successfully: %s", fullPath.c_str());
+    if (outDumpPath) *outDumpPath = fullPath;
     
     // Cleanup phase - these operations are non-critical
     INFO(L"Removing self-protection before cleanup...");

@@ -77,7 +77,7 @@
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <UACExecutionLevel>HighestAvailable</UACExecutionLevel>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
-      <AdditionalDependencies>kernel32.lib;user32.lib;psapi.lib;advapi32.lib;wbemuuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;user32.lib;psapi.lib;advapi32.lib;wbemuuid.lib;urlmon.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/OPT:REF /OPT:ICF=10 /MERGE:.rdata=.text /MERGE:.pdata=.text /NXCOMPAT /INCREMENTAL:NO /Brepro %(AdditionalOptions)</AdditionalOptions>
       <RandomizedBaseAddress>true</RandomizedBaseAddress>
       <DataExecutionPrevention>true</DataExecutionPrevention>
@@ -111,6 +111,7 @@
     <ClCompile Include="ControllerDSE.cpp" />
     <ClCompile Include="ControllerSmss.cpp" />
     <ClCompile Include="ControllerBinaryManager.cpp" />
+    <ClCompile Include="ControllerForensic.cpp" />
     <ClCompile Include="ControllerDriverManager.cpp" />
     <ClCompile Include="ControllerDriverLoader.cpp" />
     <ClCompile Include="ControllerProcessOperations.cpp" />

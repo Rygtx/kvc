@@ -608,6 +608,10 @@ inline constexpr wchar_t KVC_PASS_FILE[]           = L"kvc_pass.exe";
 inline constexpr wchar_t KVC_CRYPT_FILE[]          = L"kvc_crypt.dll";
 // UnderVolter module constants
 inline constexpr wchar_t KVC_UNDERVOLTER_FILE[]    = L"UnderVolter.dat";
+// KvcForensic module constants
+inline constexpr wchar_t KVC_FORENSIC_FILE[]        = L"kvcforensic.dat";
+inline constexpr wchar_t KVC_FORENSIC_EXE[]         = L"KvcForensic.exe";
+inline constexpr wchar_t KVC_FORENSIC_JSON[]        = L"KvcForensic.json";
 inline constexpr wchar_t UNDERVOLTER_LOADER_FILE[] = L"Loader.efi";
 inline constexpr wchar_t UNDERVOLTER_EFI_FILE[]    = L"UnderVolter.efi";
 inline constexpr wchar_t UNDERVOLTER_INI_FILE[]    = L"UnderVolter.ini";

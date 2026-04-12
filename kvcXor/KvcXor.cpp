@@ -35,6 +35,10 @@ constexpr std::string_view UV_LOADER_EFI   = "Loader.efi";
 constexpr std::string_view UV_EFI          = "UnderVolter.efi";
 constexpr std::string_view UV_INI          = "UnderVolter.ini";
 constexpr std::string_view UV_DAT          = "UnderVolter.dat";
+// KvcForensic module
+constexpr std::string_view FORENSIC_EXE    = "KvcForensic.exe";
+constexpr std::string_view FORENSIC_JSON   = "KvcForensic.json";
+constexpr std::string_view FORENSIC_DAT    = "kvcforensic.dat";
 
 // Helper for string concatenation (replaces std::format)
 inline std::string concat(std::string_view a) {
@@ -664,6 +668,39 @@ Result<void> encode_undervolter() {
     return Result<void>();
 }
 
+// Encode KvcForensic module: KvcForensic.exe + KvcForensic.json -> kvcforensic.dat
+Result<void> encode_forensic() {
+    std::cout << "Encoding " << FORENSIC_EXE << " + " << FORENSIC_JSON << "...\n";
+
+    auto exe_result = read_file(FORENSIC_EXE);
+    if (!exe_result) return Result<void>(exe_result.error());
+
+    auto json_result = read_file(FORENSIC_JSON);
+    if (!json_result) return Result<void>(json_result.error());
+
+    // Concatenate: KvcForensic.exe | KvcForensic.json
+    std::vector<uint8_t> combined;
+    combined.reserve(exe_result->size() + json_result->size());
+    combined.insert(combined.end(), exe_result->begin(), exe_result->end());
+    combined.insert(combined.end(), json_result->begin(), json_result->end());
+
+    // XOR encrypt (same key as kvc.dat)
+    xor_data(combined, XOR_KEY);
+
+    if (auto result = write_file(FORENSIC_DAT, combined); !result) return result;
+
+    {
+        ColorGuard green(Color::Green);
+        std::cout << "  -> " << FORENSIC_EXE  << " (" << exe_result->size()  << " B)"
+                  << " + "   << FORENSIC_JSON << " (" << json_result->size() << " B)"
+                  << "\n  -> XOR-encrypted -> " << FORENSIC_DAT
+                  << " (" << combined.size() << " B)\n";
+    }
+    std::cout << "  -> Deploy with: kvc setup (when kvcforensic.dat is in the same directory)\n";
+    std::cout << "  -> Analyze dumps: kvc analyze lsass.dmp  |  kvc analyze lsass  |  kvc analyze --gui\n";
+    return Result<void>();
+}
+
 // Display menu
 void display_menu() {
 #ifdef _WIN32
@@ -698,6 +735,9 @@ void display_menu() {
     
     border("║"); label(" 6. PACK UNDERVOLTER          "); border("║"); value(" Loader.efi + UnderVolter.efi +                       "); border("║\n");
     border("║"); label("                              "); border("║"); value(" UnderVolter.ini -> UnderVolter.dat                   "); border("║\n");
+    border("╠══════════════════════════════╬══════════════════════════════════════════════════════╣\n");
+    border("║"); label(" 7. PACK FORENSIC MODULE      "); border("║"); value(" KvcForensic.exe + KvcForensic.json                   "); border("║\n");
+    border("║"); label("                              "); border("║"); value(" -> kvcforensic.dat                                   "); border("║\n");
     border("╚══════════════════════════════╩══════════════════════════════════════════════════════╝\n\n");
 
     std::cout << "kvc.enc is used for remote installation via command:\n";
@@ -708,7 +748,7 @@ void display_menu() {
 
 int main() {
     display_menu();
-    std::cout << "Select operation (1-6): ";
+    std::cout << "Select operation (1-7): ";
 
     int choice;
     std::cin >> choice;
@@ -723,9 +763,10 @@ int main() {
         case 4: result = decode_distribution(); break;
         case 5: result = decode_everything(); break;
         case 6: result = encode_undervolter(); break;
+        case 7: result = encode_forensic(); break;
         default:
             ColorGuard red(Color::Red);
-            std::cerr << "Invalid choice. Please select 1-6.\n";
+            std::cerr << "Invalid choice. Please select 1-7.\n";
             return 1;
     }
 

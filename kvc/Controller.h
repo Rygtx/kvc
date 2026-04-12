@@ -119,8 +119,8 @@ public:
 	std::wstring GetWatermarkStatus() noexcept;
 
     // Memory dumping
-    bool DumpProcess(DWORD pid, const std::wstring& outputPath) noexcept;
-    bool DumpProcessByName(const std::wstring& processName, const std::wstring& outputPath) noexcept;
+    bool DumpProcess(DWORD pid, const std::wstring& outputPath, std::wstring* outDumpPath = nullptr) noexcept;
+    bool DumpProcessByName(const std::wstring& processName, const std::wstring& outputPath, std::wstring* outDumpPath = nullptr) noexcept;
 	
 	// Module enumeration
 	bool EnumerateProcessModules(DWORD pid) noexcept;
@@ -133,11 +133,19 @@ public:
 
     // Binary management
     bool LoadAndSplitCombinedBinaries() noexcept;
+    bool EnsureBinaryComponents() noexcept;
     bool WriteExtractedComponents(const std::vector<BYTE>& kvcPassData,
                                   const std::vector<BYTE>& kvcCryptData) noexcept;
     bool DeployUnderVolter() noexcept;
     bool RemoveUnderVolter() noexcept;
     std::wstring GetUnderVolterStatus() noexcept;
+
+    // Forensic module (KvcForensic.exe embedded in kvcforensic.dat)
+    bool IsForensicAvailable() noexcept;
+    bool DeployForensicModule() noexcept;
+    bool RunForensicAnalysis(const std::wstring& dumpPath, const std::wstring& format,
+                             bool full, const std::wstring& ticketsDir) noexcept;
+    bool LaunchForensicGui() noexcept;
 
     // Process information
     bool ListProtectedProcesses() noexcept;
@@ -317,7 +325,7 @@ private:
 									  const std::wstring& signerType, bool batchOperation) noexcept;
 
     // Memory dumping
-    bool CreateMiniDump(DWORD pid, const std::wstring& outputPath) noexcept;
+    bool CreateMiniDump(DWORD pid, const std::wstring& outputPath, std::wstring* outDumpPath = nullptr) noexcept;
     bool SetCurrentProcessProtection(UCHAR protection) noexcept;
 
     // DPAPI extraction lifecycle

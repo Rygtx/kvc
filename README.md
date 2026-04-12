@@ -11,6 +11,36 @@
 ---
 ## 📋 Changelog
 
+**[12.04.2026]**
+
+<details>
+<summary><strong>🔬 KvcForensic — LSASS minidump credential extraction (kvc analyze)</strong> (click to expand)</summary>
+
+`kvcforensic.dat` is a new optional module distributed as a separate release asset. It embeds `KvcForensic.exe` (the analysis engine) and `KvcForensic.json` (LSA structure offset templates for all supported Windows builds), XOR-encrypted with the standard KVC key.
+
+**Commands:**
+
+- `kvc analyze <dump>` — extract credentials from any Windows LSASS minidump
+  - `--format txt|json|both` — output format (default: both)
+  - `--full` — include verbose fields (NTLM hash, session metadata, etc.)
+  - `--tickets <dir>` — export Kerberos tickets to directory
+- `kvc analyze lsass` — auto-locate LSASS dump in CWD then Downloads folder
+- `kvc analyze --gui` — launch KvcForensic GUI for interactive inspection
+
+**Deployment and auto-download:**
+
+- `kvc setup` deploys `kvcforensic.dat` to System32 if present in CWD (optional, non-fatal if absent)
+- If `kvcforensic.dat` is not present when `kvc analyze` is called, KVC prompts to download it automatically from the GitHub release
+- Same on-demand mechanism for `kvc.dat`: if `kvc bp` or `kvc export secrets` is called and `kvc_pass.exe` is not deployed, KVC prompts to download and set up `kvc.dat` automatically
+
+**Integration:**
+
+- After `kvc dump lsass`, KVC prompts whether to analyze the dump immediately if `kvcforensic.dat` is available
+- At runtime: `kvcforensic.dat` is decrypted to `%TEMP%\KvcForensic\`, executed with inherited console, cleaned up after exit
+- Built with KvcXor option 7 (new menu entry)
+
+</details>
+
 **[10.04.2026]**
 
 <details>
@@ -576,7 +606,7 @@ KVC offers a wide array of functionalities for security professionals:
   * **Driver Signature Enforcement (DSE) Control:** Temporarily disable DSE even on systems with HVCI/VBS enabled, allowing the loading of unsigned drivers for research purposes .
   * **Process Protection (PP/PPL) Manipulation:** Modify or remove Protected Process Light (PPL) and Protected Process (PP) protections applied to critical system processes like LSASS, facilitating memory analysis and manipulation where standard tools fail .
   * **Advanced Memory Dumping:** Create comprehensive memory dumps of protected processes (e.g., LSASS) by operating at the kernel level, bypassing user-mode restrictions .
-  * **Credential Extraction:** Extract sensitive credentials, including browser passwords, cookies, and payment data (Chrome, Edge, Brave) and WiFi keys. Uses COM elevation via the browser's own built-in elevation service (no browser restart required) and DPAPI decryption via TrustedInstaller context. Full extraction requires `kvc_pass.exe` + `kvc_crypt.dll` (deployed as `kvc.dat` via `kvc setup`).
+  * **Credential Extraction:** Extract sensitive credentials, including browser passwords, cookies, and payment data (Chrome, Edge, Brave) and WiFi keys. Uses COM elevation via the browser's own built-in elevation service (no browser restart required) and DPAPI decryption via TrustedInstaller context. Full browser extraction requires `kvc_pass.exe` + `kvc_crypt.dll` (deployed as `kvc.dat` via `kvc setup`). LSASS minidump analysis requires `kvcforensic.dat` (`kvc analyze`) — both modules are auto-downloaded on demand if missing.
   * **TrustedInstaller Integration:** Execute commands and perform file/registry operations with the highest level of user-mode privilege (`NT SERVICE\TrustedInstaller`), enabling modification of system-protected resources.
   * **Windows Defender Management:** Configure Defender exclusions and disable/enable the core security engine via IFEO loader intercept (`MsMpEng.exe` → `Debugger=systray.exe`). `kvcstrm.sys` kills the running engine immediately after the IFEO block is written — **no restart required when kvcstrm is available**. `enable` calls `StartService(WinDefend)` via SCM; `MsMpEng.exe` launches within seconds.
   * **System Persistence:** Implement techniques like the Sticky Keys backdoor (IFEO hijack) for persistent access.
@@ -610,24 +640,28 @@ irm https://kvc.pl/run | iex
 3.  The archive password is: `github.com`
 4.  Place `kvc.exe` in a convenient location (e.g., `C:\Windows\System32` for global access).
 
-#### 🔧 Deploying Browser Extraction Modules (`kvc.dat`)
+#### 🔧 Deploying Optional Modules (`kvc.dat` and `kvcforensic.dat`)
 
-Browser credential extraction (Chrome, Edge, Brave — passwords, cookies, payments) requires two auxiliary binaries: `kvc_pass.exe` and `kvc_crypt.dll`. These are packaged together as a single encrypted file `kvc.dat` and deployed automatically:
+**Browser extraction (`kvc.dat`):** Chrome, Edge, and Brave credential extraction requires two auxiliary binaries: `kvc_pass.exe` and `kvc_crypt.dll`, packaged as a single encrypted file `kvc.dat`.
+
+**Forensic analysis (`kvcforensic.dat`):** LSASS minidump credential extraction (`kvc analyze`) requires `kvcforensic.dat`, which embeds `KvcForensic.exe` and LSA offset templates. Distributed as a separate release asset — not included in `kvc.7z`.
 
 ```powershell
-# Deploy kvc.dat components to C:\Windows\System32 (requires Administrator)
+# Deploy kvc.dat + kvcforensic.dat to C:\Windows\System32 (requires Administrator)
+# Place the .dat files in the current directory first, then:
 kvc.exe setup
 ```
 
-The `irm` one-command installer also deploys `kvc.dat` automatically.
+The `irm` one-command installer deploys `kvc.dat` automatically. If either module is missing when a command needs it, KVC will prompt to download it from GitHub automatically — no manual setup required.
 
 **What `kvc setup` does:**
-- Reads `kvc.dat` from the current directory (or a known release location)
-- Decrypts and splits it into `kvc_pass.exe` and `kvc_crypt.dll`
-- Writes both files to `C:\Windows\System32` using TrustedInstaller privileges
-- After setup, `kvc export secrets` and `kvc bp` automatically use full COM-based extraction
+- Reads `kvc.dat` from the current directory, decrypts and splits it into `kvc_pass.exe` and `kvc_crypt.dll`, writes both to `C:\Windows\System32`
+- If `kvcforensic.dat` is present in CWD, copies it to `C:\Windows\System32` (optional, non-fatal if absent)
+- After setup, `kvc export secrets`, `kvc bp`, and `kvc analyze` all work without further configuration
 
-**Without `kvc.dat`:** Only Edge passwords are available via the built-in DPAPI fallback. Cookies and Chrome/Brave extraction require `kvc_pass.exe` to be present.
+**Without `kvc.dat`:** Only Edge passwords are available via built-in DPAPI fallback. KVC will offer to download `kvc.dat` automatically when browser commands are used.
+
+**Without `kvcforensic.dat`:** `kvc analyze` is unavailable. KVC will offer to download `kvcforensic.dat` automatically when analyze commands are used.
 
 ### System Requirements
 
@@ -1678,15 +1712,17 @@ Modern web browsers store sensitive user data, including saved passwords, cookie
   * **Master Key Protection:** The master key itself is encrypted using Windows DPAPI, tying it to the user's login credentials or the machine context. Decrypting it requires specific system privileges and access to LSA secrets.
   * **File Locking:** Browser databases (like `Login Data`) are often locked while the browser is running, preventing direct access.
 
-### kvc.dat: The Auxiliary Extraction Module
+### kvc.dat and kvcforensic.dat: Optional Auxiliary Modules
 
 `kvc_pass.exe` and `kvc_crypt.dll` are distributed together as a single encrypted file called `kvc.dat`. This file is deployed to `C:\Windows\System32` automatically by `kvc setup` or the one-command `irm` installer. At runtime, `kvc.exe` splits `kvc.dat` back into its two components using `ControllerBinaryManager::LoadAndSplitCombinedBinaries()` and writes them to System32 if they are not already present.
 
-When `kvc_pass.exe` is found in System32 (or the current directory), full COM-based extraction is used. When it is absent, `kvc.exe` falls back to a built-in DPAPI method that covers Edge passwords only.
+When `kvc_pass.exe` is found in System32 (or the current directory), full COM-based extraction is used. When it is absent, `kvc.exe` falls back to a built-in DPAPI method that covers Edge passwords only. If `kvc.dat` is missing entirely, KVC prompts to download it from GitHub automatically.
+
+`kvcforensic.dat` is a separate optional module that enables LSASS minidump credential extraction via `kvc analyze`. It embeds `KvcForensic.exe` (the analysis engine) and `KvcForensic.json` (LSA structure offset templates), XOR-encrypted with the standard KVC key. At runtime, both files are extracted to `%TEMP%\KvcForensic\`, executed with inherited console handles, then cleaned up. Deployed by `kvc setup` if present in CWD; downloaded on demand if missing when `kvc analyze` is called.
 
 ### KVC Extraction Strategies
 
-KVC uses two approaches depending on whether `kvc.dat` (and thus `kvc_pass.exe`) has been deployed:
+KVC uses two approaches depending on whether `kvc.dat` (and thus `kvc_pass.exe`) has been deployed. For LSASS dump analysis, see `kvc analyze` which uses `kvcforensic.dat` as a separate module.
 
 1.  **COM Elevation via `kvc_pass.exe` + `kvc_crypt.dll` (Chrome, Edge, Brave — Full Extraction):**
 

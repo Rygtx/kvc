@@ -1,4 +1,5 @@
 # Skrypty lokalne
+deploy.sh
 git-push.sh
 pack-release.sh
 pack-data.sh

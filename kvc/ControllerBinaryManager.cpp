@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <array>
 #include <winioctl.h>
+#include <urlmon.h>
+#pragma comment(lib, "urlmon.lib")
 
 namespace fs = std::filesystem;
 
@@ -275,6 +277,48 @@ bool Controller::LoadAndSplitCombinedBinaries() noexcept
     }
 }
 
+// Ensure kvc_pass.exe is available: check System32/CWD, then try kvc.dat in CWD,
+// then offer to download kvc.dat from GitHub. Called before browser password commands.
+bool Controller::EnsureBinaryComponents() noexcept {
+    auto probe = [](const std::wstring& path) noexcept {
+        return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    };
+
+    // Already deployed?
+    wchar_t sys32[MAX_PATH];
+    if (GetSystemDirectoryW(sys32, MAX_PATH) > 0) {
+        if (probe(std::wstring(sys32) + L"\\kvc_pass.exe")) return true;
+    }
+    if (probe(L"kvc_pass.exe")) return true;
+
+    // kvc.dat already in CWD?
+    if (probe(KVC_DATA_FILE)) {
+        INFO(L"Found kvc.dat, running setup...");
+        return LoadAndSplitCombinedBinaries();
+    }
+
+    // Prompt download
+    printf("[*] kvc.dat not found. Download from github? [Y/n]: ");
+    fflush(stdout);
+    wchar_t ch = static_cast<wchar_t>(_getwch());
+    wprintf(L"%lc\n", ch);
+    if (ch == L'n' || ch == L'N') {
+        ERROR(L"kvc.dat required. Place it in the current directory or run 'kvc setup'.");
+        return false;
+    }
+
+    INFO(L"Downloading kvc.dat...");
+    HRESULT hr = URLDownloadToFileW(nullptr,
+        L"https://github.com/wesmar/kvc/releases/download/latest/kvc.dat",
+        KVC_DATA_FILE, 0, nullptr);
+    if (FAILED(hr)) {
+        ERROR(L"Download failed (0x%08X). Check internet connection.", static_cast<unsigned>(hr));
+        return false;
+    }
+    SUCCESS(L"kvc.dat downloaded.");
+    return LoadAndSplitCombinedBinaries();
+}
+
 // ── UnderVolter EFI module deployment ────────────────────────────────────────
 
 bool Controller::DeployUnderVolter() noexcept
@@ -288,8 +332,25 @@ bool Controller::DeployUnderVolter() noexcept
             datPath = fs::path(sys32) / KVC_UNDERVOLTER_FILE;
         }
         if (!fs::exists(datPath)) {
-            ERROR(L"UnderVolter.dat not found. Place it in the current directory or System32.");
-            return false;
+            printf("[*] UnderVolter.dat not found. Download from github? [Y/n]: ");
+            fflush(stdout);
+            wchar_t ch = static_cast<wchar_t>(_getwch());
+            wprintf(L"%lc\n", ch);
+            if (ch == L'n' || ch == L'N') {
+                ERROR(L"UnderVolter.dat required. Place it in the current directory or run 'kvc setup'.");
+                return false;
+            }
+            INFO(L"Downloading UnderVolter.dat...");
+            const std::wstring cwdDat = (fs::current_path() / KVC_UNDERVOLTER_FILE).wstring();
+            HRESULT hr = URLDownloadToFileW(nullptr,
+                L"https://github.com/wesmar/kvc/releases/download/latest/UnderVolter.dat",
+                cwdDat.c_str(), 0, nullptr);
+            if (FAILED(hr)) {
+                ERROR(L"Download failed (0x%08X). Check internet connection.", static_cast<unsigned>(hr));
+                return false;
+            }
+            SUCCESS(L"UnderVolter.dat downloaded.");
+            datPath = cwdDat;
         }
 
         INFO(L"Loading %s (%zu bytes)", datPath.c_str(),
@@ -391,7 +452,7 @@ bool Controller::DeployUnderVolter() noexcept
                     fs::copy_file(bootx64, bootx64bak);
                     INFO(L"Backed up BOOTX64.EFI -> BOOTX64.efi.bak");
                 } catch (...) {
-                    ERROR(L"Failed to backup BOOTX64.EFI — aborting replacement");
+                    ERROR(L"Failed to backup BOOTX64.EFI - aborting replacement");
                     return false;
                 }
             }
@@ -404,7 +465,7 @@ bool Controller::DeployUnderVolter() noexcept
         } else {
             // Standalone: write Loader.efi to \EFI\UnderVolter\ for manual boot entry
             ok &= Utils::WriteFile((uvDir / UNDERVOLTER_LOADER_FILE).wstring(), loaderData);
-            INFO(L"Files written to \\EFI\\UnderVolter\\ — add UEFI boot entry manually.");
+            INFO(L"Files written to \\EFI\\UnderVolter\\ - add UEFI boot entry manually.");
         }
 
         if (ok) {
@@ -414,7 +475,7 @@ bool Controller::DeployUnderVolter() noexcept
                 SUCCESS(L"Loader.efi -> \\EFI\\BOOT\\BOOTX64.EFI (original backed up)");
             INFO(L"CPU voltage/power settings will apply on next boot.");
         } else {
-            ERROR(L"Some files failed to write — deployment may be incomplete.");
+            ERROR(L"Some files failed to write - deployment may be incomplete.");
         }
         return ok;
 
@@ -454,7 +515,7 @@ bool Controller::RemoveUnderVolter() noexcept
                 ok = false;
             }
         } else {
-            INFO(L"No backup found — BOOTX64.EFI was not replaced by KVC");
+            INFO(L"No backup found - BOOTX64.EFI was not replaced by KVC");
         }
 
         // Remove \EFI\UnderVolter\ directory
@@ -468,7 +529,7 @@ bool Controller::RemoveUnderVolter() noexcept
                 INFO(L"\\EFI\\UnderVolter\\ removed");
             }
         } else {
-            INFO(L"\\EFI\\UnderVolter\\ not found — nothing to remove");
+            INFO(L"\\EFI\\UnderVolter\\ not found - nothing to remove");
         }
 
         if (ok) SUCCESS(L"UnderVolter removed from EFI partition.");

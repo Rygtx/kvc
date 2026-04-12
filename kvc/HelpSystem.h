@@ -49,6 +49,7 @@ private:
     static void PrintDPAPICommands() noexcept;
     static void PrintWatermarkCommands() noexcept;
     static void PrintUnderVolterCommands() noexcept;
+    static void PrintForensicCommands() noexcept;
     static void PrintEntertainmentCommands() noexcept;
 
     // Reference sections

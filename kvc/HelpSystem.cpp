@@ -67,6 +67,7 @@ void HelpSystem::PrintUsage(std::wstring_view programName) noexcept
     PrintDPAPICommands();
     PrintWatermarkCommands();
     PrintUnderVolterCommands();
+    PrintForensicCommands();
     PrintEntertainmentCommands();
     PrintProtectionTypes();
     PrintExclusionTypes();
@@ -166,7 +167,8 @@ void HelpSystem::PrintBasicCommands() noexcept
 {
     PrintSectionHeader(L"Memory Dumping Commands");
     PrintCommandLine(L"dump <PID|process_name> [path]", L"Create comprehensive memory dump");
-    PrintNote(L"Default path is the Downloads folder - simple: 'kvc dump lsass'");
+    PrintNote(L"Default output: Downloads folder. Custom path: 'kvc dump lsass C:\\dumps'");
+    PrintNote(L"After lsass dump: offered immediate credential analysis via KvcForensic");
     PrintWarning(L"MsMpEng dump only works with Defender disabled (otherwise Ctrl+C)");
     std::wcout << L"\n";
     
@@ -352,6 +354,22 @@ void HelpSystem::PrintUnderVolterCommands() noexcept
     PrintNote(L"Build UnderVolter.dat: KvcXor.exe option 6 (Loader.efi + UnderVolter.efi + UnderVolter.ini)");
     PrintNote(L"Deploy mode A: replaces \\EFI\\BOOT\\BOOTX64.EFI (original backed up as BOOTX64.efi.bak)");
     PrintNote(L"Deploy mode B: copies to \\EFI\\UnderVolter\\ only - add UEFI boot entry manually");
+    std::wcout << L"\n";
+}
+
+void HelpSystem::PrintForensicCommands() noexcept
+{
+    PrintSectionHeader(L"Forensic Analysis - KvcForensic Module");
+    PrintCommandLine(L"analyze <dump.dmp>", L"Analyze minidump - extract credentials (MSV/WDigest/Kerberos/TSPKG)");
+    PrintCommandLine(L"analyze <dump.dmp> --format txt|json|both", L"Output format (default: both)");
+    PrintCommandLine(L"analyze <dump.dmp> --full", L"Include metadata header in text report");
+    PrintCommandLine(L"analyze <dump.dmp> --tickets <dir>", L"Export Kerberos tickets as .kirbi + .ccache");
+    PrintCommandLine(L"analyze lsass", L"Find most recent lsass dump (CWD or Downloads) and analyze");
+    PrintCommandLine(L"analyze --gui", L"Open KvcForensic in GUI mode (drag-and-drop interface)");
+    PrintNote(L"Output files written alongside the dump (.txt / .json, same directory)");
+    PrintNote(L"Requires kvcforensic.dat - place in CWD and run 'kvc setup', or copy to System32");
+    PrintNote(L"Build kvcforensic.dat: KvcXor.exe option 7 (KvcForensic.exe + KvcForensic.json)");
+    PrintNote(L"'kvc dump lsass' offers immediate analysis after successful dump");
     std::wcout << L"\n";
 }
 

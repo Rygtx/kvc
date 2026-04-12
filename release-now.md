@@ -1,5 +1,3 @@
-# KVC Framework - Release ${DATE}
-
 ## 🔐 PASSWORD: `github.com`
 ### Extract downloaded release with password: `github.com`
 
